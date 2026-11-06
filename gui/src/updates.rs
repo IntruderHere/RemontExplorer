@@ -122,29 +122,58 @@ fn check_atom(current: &str) -> Result<Option<UpdateInfo>, String> {
     }
 }
 
-/// Достать (тег, ссылка) первого релиза из Atom-фида.
+/// Достать (версия, ссылка) последнего релиза из Atom-фида.
+///
+/// Важно: в `<title>` GitHub кладёт НАЗВАНИЕ релиза («RemontExplorer 2.0.0»),
+/// а не тег, поэтому версия берётся из ссылки `/releases/tag/v2.0.0`
+/// (при её отсутствии — из `<id>` вида `tag:github.com,2008:Repository/1/v2.0.0`).
 pub fn parse_atom(xml: &str) -> Option<(String, String)> {
     let entry_start = xml.find("<entry")?;
     let entry = &xml[entry_start..];
-    let title_start = entry.find("<title>")? + "<title>".len();
-    let title_end = title_start + entry[title_start..].find("</title>")?;
-    let tag = entry[title_start..title_end].trim().to_string();
-    if tag.is_empty() {
-        return None;
-    }
-    // ссылка на страницу релиза — первый href .../releases/tag/...
-    let href = entry
-        .find("/releases/tag/")
-        .map(|i| {
-            let before = &entry[..i];
+    let entry_end = entry.find("</entry>").unwrap_or(entry.len());
+    let entry = &entry[..entry_end];
+
+    // 1) ссылка на страницу релиза -> версия из хвоста
+    if let Some(pos) = entry.find("/releases/tag/") {
+        let after = &entry[pos + "/releases/tag/".len()..];
+        let end = after
+            .find(['"', '<', '?'])
+            .unwrap_or(after.len());
+        let tag = after[..end].trim();
+        if !tag.is_empty() {
+            // начало href — от последней кавычки перед "/releases"
+            let before = &entry[..pos];
             let quote = before.rfind('"').map(|q| q + 1).unwrap_or(0);
-            let after = &entry[i..];
-            let end = after.find('"').unwrap_or(after.len());
-            format!("https://github.com{}{}", &entry[quote..i], &after[..end])
-        })
-        .filter(|u| u.contains("/releases/tag/"))
-        .unwrap_or_else(|| format!("https://github.com/{REPO}/releases"));
-    Some((tag, href))
+            let url = format!("https://github.com{}{}", &entry[quote..pos], &entry[pos..pos + "/releases/tag/".len() + end]);
+            if is_version_like(tag) {
+                return Some((tag.to_string(), url));
+            }
+        }
+    }
+
+    // 2) запасной путь — <id>tag:github.com,2008:Repository/1/v2.0.0</id>
+    if let Some(id_start) = entry.find("<id>") {
+        let rest = &entry[id_start + 4..];
+        if let Some(id_end) = rest.find("</id>") {
+            let id = &rest[..id_end];
+            if let Some(slash) = id.rfind('/') {
+                let tag = id[slash + 1..].trim();
+                if is_version_like(tag) {
+                    return Some((
+                        tag.to_string(),
+                        format!("https://github.com/{REPO}/releases/tag/{tag}"),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Похоже ли на версию: начинается с цифры или `v` + цифра.
+fn is_version_like(s: &str) -> bool {
+    let s = s.trim_start_matches(['v', 'V']);
+    s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -164,12 +193,21 @@ mod tests {
 
     #[test]
     fn parses_atom_feed() {
-        let xml = r#"<?xml version="1.0"?><feed><entry><id>tag:github.com,2008:Repository/1/v2.1.0</id>
+        // Реальный формат GitHub: в <title> — название релиза, тег — в ссылке.
+        let xml = r#"<?xml version="1.0"?><feed><entry>
+        <id>tag:github.com,2008:Repository/123456789/v2.1.0</id>
+        <updated>2026-11-06T12:00:00Z</updated>
         <link rel="alternate" type="text/html" href="https://github.com/IntruderHere/RemontExplorer/releases/tag/v2.1.0"/>
-        <title>v2.1.0</title></entry></feed>"#;
+        <title>RemontExplorer 2.1.0</title></entry></feed>"#;
         let (tag, url) = parse_atom(xml).expect("фид разобран");
-        assert_eq!(tag, "v2.1.0");
+        assert_eq!(tag, "v2.1.0", "версия должна браться из ссылки, а не из названия");
         assert!(url.ends_with("/releases/tag/v2.1.0"), "ссылка: {url}");
+
+        // Без ссылки — версия из <id>.
+        let xml2 = r#"<feed><entry><id>tag:github.com,2008:Repository/1/v3.0.0</id>
+        <title>Release</title></entry></feed>"#;
+        assert_eq!(parse_atom(xml2).unwrap().0, "v3.0.0");
+
         assert!(parse_atom("<feed></feed>").is_none());
     }
 
