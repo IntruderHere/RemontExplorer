@@ -250,12 +250,31 @@ Windows не присылает WM_PAINT.
 - Тесты: `ui_layout_follows_latest_requirements` (все пункты выше) и
   `core/tests/output_dir.rs` (отчёт попадает в выбранную папку, путь запоминается и сбрасывается).
 
+### 3.13. Проверка обновлений на GitHub и публикация репозитория
+- Репозиторий: **https://github.com/IntruderHere/RemontExplorer** (public, ветка `main`).
+  Первый релиз — тег **v2.0.0** с приложенным архивом `RemontExplorer-windows-x64.zip`.
+- Версия берётся из `Cargo.toml` (`env!("CARGO_PKG_VERSION")`), workspace-версия поднята до **2.0.0**.
+- Модуль `gui/src/updates.rs`:
+  - основной канал — GitHub API `releases/latest` (сравнение тега с текущей версией);
+  - **запасной канал** — Atom-фид `github.com/<repo>/releases.atom` для сетей, где `api.github.com`
+    недоступен (в `parse_atom` версия берётся из ссылки `/releases/tag/v2.0.0`, а НЕ из `<title>`:
+    там GitHub пишет название релиза);
+  - проверка в фоновом потоке, результат приходит по каналу (`start_update_check` / `poll_update`),
+    интерфейс не блокируется.
+- UI: кнопка-баннер «⬆ Доступна версия X» в шапке, в «О приложении» — статус, кнопка
+  «Проверить обновления» и «Скачать обновление» (открывает страницу релиза в браузере).
+- Настройка «Проверять обновления при запуске» (`check_updates`, по умолчанию включена).
+
+**Особенность сети разработчика:** `api.github.com` не резолвится в рабочий адрес (таймаут), поэтому
+запросы к API выполнялись с `curl --resolve api.github.com:443:140.82.112.6`. На обычной сети
+Windows этого не требуется; запасной Atom-канал закрывает случай корпоративной блокировки.
+
 ## 4. Состояние проверок (на момент передачи)
 
 | Проверка | Результат |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | **55 тестов, 0 провалов**: 24 GUI-unit + parity-наборы (18) + i18n_smoke (2) + xlsx_output (1) |
+| `cargo test --workspace` | **58 тестов, 0 провалов**: 24 GUI-unit + parity-наборы (18) + i18n_smoke (2) + xlsx_output (1) |
 | `cargo clippy --workspace --all-targets` | 0 warnings |
 | `cargo run --example e2e_smoke` | «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ (7 режимов)» |
 | `cargo run --example probe_modal` | 412×117 (компактно) |
