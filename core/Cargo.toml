@@ -1,12 +1,12 @@
 [package]
-name = "filemanager-core"
-description = "Ядро FileManager: файловые операции без GUI (порт filemanager 6.py)"
+name = "remont-core"
+description = "Ядро RemontExplorer: файловые операции без GUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "filemanager_core"
+name = "remont_core"
 path = "src/lib.rs"
 
 [dependencies]

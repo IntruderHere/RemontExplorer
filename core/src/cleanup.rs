@@ -1,9 +1,9 @@
-//! Очистка папок от пустых подпапок (порт `cleanup_empty_folders`).
+//! Очистка папок от пустых подпапок.
 //!
-//! Семантика (парность с Python): один проход снизу вверх; удаляются
+//! Семантика: один проход снизу вверх; удаляются
 //! папки, НЕ содержавшие файлов/подпапок на момент обхода (родитель,
 //! освободившийся после удаления детей, в этом же проходе НЕ удаляется —
-//! как в Python `os.walk`).
+//! снизу вверх).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use crate::stop::StopToken;
 use crate::{emit_progress, LogSink};
 use crate::em;
 
-/// Очищает `root` от пустых папок (порт `cleanup_empty_folders`).
+/// Очищает `root` от пустых папок.
 /// Возвращает число удалённых папок.
 pub fn cleanup_empty_folders(root: &Path, stop: &StopToken, log: &LogSink) -> usize {
     stop.reset();

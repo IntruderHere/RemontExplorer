@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use filemanager_core::{delete_paths, stdout_sink, StopToken};
+use remont_core::{delete_paths, stdout_sink, StopToken};
 use tempfile::TempDir;
 
 #[test]

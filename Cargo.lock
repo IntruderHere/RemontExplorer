@@ -1388,45 +1388,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filemanager-core"
-version = "2.0.0"
-dependencies = [
- "chrono",
- "csv",
- "encoding_rs",
- "filetime",
- "md-5",
- "rayon",
- "rust_xlsxwriter",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "walkdir",
- "zip 2.6.1",
-]
-
-[[package]]
-name = "filemanager-gui"
-version = "2.0.0"
-dependencies = [
- "chrono",
- "dirs",
- "eframe",
- "egui",
- "embed-resource",
- "filemanager-core",
- "image",
- "raw-window-handle",
- "rfd",
- "serde",
- "serde_json",
- "tray-icon",
- "ureq",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3449,6 +3410,45 @@ checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "remont-core"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "csv",
+ "encoding_rs",
+ "filetime",
+ "md-5",
+ "rayon",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
+ "zip 2.6.1",
+]
+
+[[package]]
+name = "remont-gui"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "dirs",
+ "eframe",
+ "egui",
+ "embed-resource",
+ "image",
+ "raw-window-handle",
+ "remont-core",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tray-icon",
+ "ureq",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

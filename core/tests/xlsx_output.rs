@@ -1,12 +1,12 @@
 //! Формат отчётов XLSX: CSV конвертируется в книгу Excel и удаляется.
 //! Отдельный тестовый бинарник — глобальный формат не влияет на другие тесты.
 
-use filemanager_core::{scan_folder, set_output_format, OutputFormat, Sink, StopToken};
+use remont_core::{scan_folder, set_output_format, OutputFormat, Sink, StopToken};
 use std::fs;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
-fn quiet() -> filemanager_core::LogSink {
+fn quiet() -> remont_core::LogSink {
     Arc::new(Mutex::new(Sink::text_only(|_| {})))
 }
 

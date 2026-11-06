@@ -1,14 +1,14 @@
-//! Одноразовый пробник для cross-language parity: сканирует папку в CSV.
-//! Использование: parity_scan_run <root> <output.csv>
+//! Пробник сканирования: сканирует папку в CSV.
+//! Использование: scan_probe <root> <output.csv>
 
 use std::path::PathBuf;
 
-use filemanager_core::{scan_folder, stdout_sink, StopToken};
+use remont_core::{scan_folder, stdout_sink, StopToken};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
-        eprintln!("usage: parity_scan_run <root> <output.csv>");
+        eprintln!("usage: scan_probe <root> <output.csv>");
         std::process::exit(2);
     }
     let root = PathBuf::from(&args[1]);

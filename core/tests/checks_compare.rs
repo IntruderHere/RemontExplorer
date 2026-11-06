@@ -1,8 +1,8 @@
-//! Parity-тест сравнения: классификация различий и формат отчёта.
+//! Тест сравнения: классификация различий и формат отчёта.
 
 use std::fs;
 
-use filemanager_core::{compare_folders, stdout_sink, CompareMethod, StopToken};
+use remont_core::{compare_folders, stdout_sink, CompareMethod, StopToken};
 use tempfile::TempDir;
 
 #[test]
@@ -24,8 +24,7 @@ fn compare_detects_differences() {
 
     let stop = StopToken::new();
     let log = stdout_sink();
-    let reports = compare_folders(&cfg, CompareMethod::SizeDate, Some(&out), &stop, &log)
-        .expect("сравнение");
+    let reports = compare_folders(&cfg, CompareMethod::SizeDate, Some(&out), &stop, &log).expect("сравнение");
     assert_eq!(reports.len(), 1);
 
     let text = fs::read_to_string(&out).unwrap();
@@ -64,12 +63,11 @@ fn compare_hash_method_detects_content_diff() {
     let log = stdout_sink();
     let reports = compare_folders(
         &cfg,
-        CompareMethod::Hash(filemanager_core::HashAlgo::Sha256),
+        CompareMethod::Hash(remont_core::HashAlgo::Sha256),
         Some(&out),
         &stop,
         &log,
-    )
-    .expect("сравнение");
+    ).expect("сравнение");
     assert_eq!(reports.len(), 1);
 
     let text = fs::read_to_string(&out).unwrap();
@@ -105,12 +103,11 @@ fn compare_hash_method_identical_content_marked_no() {
     let log = stdout_sink();
     compare_folders(
         &cfg,
-        CompareMethod::Hash(filemanager_core::HashAlgo::Sha256),
+        CompareMethod::Hash(remont_core::HashAlgo::Sha256),
         Some(&out),
         &stop,
         &log,
-    )
-    .expect("сравнение");
+    ).expect("сравнение");
 
     let text = fs::read_to_string(&out).unwrap();
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);

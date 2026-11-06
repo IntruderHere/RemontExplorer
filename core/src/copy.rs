@@ -1,6 +1,6 @@
-//! Копирование файлов по списку (порт `copy_files_from_list` + `_robust_copy`).
+//! Копирование файлов по списку.
 //!
-//! Возможности (парность с Python-версией):
+//! Возможности:
 //! - возобновление по кэшу `copy_resume.json` (size + mtime источника);
 //! - атомарное копирование: `.имя.tmp_*` + rename;
 //! - длинные пути Windows через префикс `\\?\` (см. [`crate::pathutil`]);
@@ -25,7 +25,7 @@ use crate::stop::StopToken;
 use crate::{emit_progress, LogSink};
 use crate::em;
 
-/// Число потоков по умолчанию (как в Python-версии).
+/// Число потоков по умолчанию.
 pub const DEFAULT_WORKERS: usize = 16;
 const RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(1500);
@@ -47,10 +47,7 @@ fn cache_key(src: &Path, dst: &Path) -> String {
 }
 
 fn load_cache(path: &Path) -> Cache {
-    fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_cache(path: &Path, cache: &Cache, log: &LogSink) {
@@ -62,7 +59,7 @@ fn save_cache(path: &Path, cache: &Cache, log: &LogSink) {
     }
 }
 
-/// Проверка «уже скопировано» (порт `_is_already_copied`).
+/// Проверка «уже скопировано».
 fn is_already_copied(src: &Path, dst: &Path, cache: &Cache) -> bool {
     let key = cache_key(src, dst);
     let Some(entry) = cache.get(&key) else {
@@ -77,30 +74,19 @@ fn is_already_copied(src: &Path, dst: &Path, cache: &Cache) -> bool {
     fs::metadata(dst).is_ok_and(|d| d.len() == entry.size)
 }
 
-/// Атомарное копирование с ретраями (порт `_robust_copy` + `retry_on_error`).
+/// Атомарное копирование с ретраями.
 fn robust_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     let src = normalize_long_path(src);
     let mut dst = normalize_long_path(dst);
     if dst.is_dir() {
-        let name = src
-            .file_name()
-            .ok_or_else(|| std::io::Error::other(crate::i18n::tr(crate::i18n::global(), "copy_empty_name")))?;
+        let name = src.file_name().ok_or_else(|| std::io::Error::other(crate::i18n::tr(crate::i18n::global(), "copy_empty_name")))?;
         dst = normalize_long_path(&dst.join(name));
     }
-    let name = dst
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let name = dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     static COPY_SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = COPY_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dst
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(
+    let tmp = dst.parent().unwrap_or_else(|| Path::new(".")).join(format!(
             ".{name}.tmp_{}_{}_{ts}",
             std::process::id(),
             seq
@@ -114,7 +100,7 @@ fn robust_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
         let res = fs::copy(&src, &tmp).and_then(|_| fs::rename(&tmp, &dst));
         match res {
             Ok(()) => {
-                // copy2: сохраняем метаданные (mtime) как в Python
+                // сохраняем метаданные (mtime) вместе с содержимым
                 if let Ok(s) = fs::metadata(&src) {
                     let _ = filetime::set_file_mtime(
                         &dst,
@@ -137,7 +123,7 @@ fn robust_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     Err(last_err)
 }
 
-/// Копирует файлы из CSV-списка (порт `copy_files_from_list`).
+/// Копирует файлы из CSV-списка.
 /// Возвращает число успешно скопированных в этом запуске.
 pub fn copy_files_from_list(
     config_file: &Path,
@@ -180,8 +166,7 @@ pub fn copy_files_from_list(
         let dst = if to.exists() && to.is_dir() {
             to.join(from.file_name().unwrap_or_default())
         } else if to_s.ends_with(['\\', '/']) {
-            PathBuf::from(to_s.trim_end_matches(['\\', '/']))
-                .join(from.file_name().unwrap_or_default())
+            PathBuf::from(to_s.trim_end_matches(['\\', '/'])).join(from.file_name().unwrap_or_default())
         } else {
             to.clone()
         };

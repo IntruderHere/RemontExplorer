@@ -1,6 +1,6 @@
-//! Сканирование папки в CSV (порт `scan_folder` из Python-версии).
+//! Сканирование папки в отчёт CSV/XLSX.
 //!
-//! Формат отчёта (парность с Python): UTF-8 с BOM, разделитель `;`
+//! Формат отчёта: UTF-8 с BOM, разделитель `;`
 //! (Excel RU), колонки:
 //! `source_root;full_path;parent_dir;name;extension;size_mb;index_ops`.
 
@@ -17,7 +17,7 @@ use crate::stop::StopToken;
 use crate::{emit_progress, LogSink};
 use crate::em;
 
-/// Эквивалент Python-регулярки `(?<!\d)\d{6}(?!\d)` + `.search`
+/// Поиск первой последовательности ровно из 6 цифр
 /// (regex crate look-around не поддерживает): первое вхождение
 /// ровно 6 цифр, не входящих в более длинную последовательность.
 fn extract_index_ops(s: &str) -> String {
@@ -76,12 +76,9 @@ enum Task {
 
 fn file_row(path: &Path, size: u64) -> Option<FileRow> {
     let name = path.file_name()?.to_string_lossy().into_owned();
-    // Парность с Python: `os.path.splitext(name)[1]` — расширение С ТОЧКОЙ
+    // Расширение сохраняется С ТОЧКОЙ (как в отчёте)
     // (".txt"); пустое -> "no_extension".
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-        .unwrap_or_else(|| "no_extension".into());
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy().to_lowercase())).unwrap_or_else(|| "no_extension".into());
     let index_ops = extract_index_ops(&path.to_string_lossy());
     Some(FileRow {
         full_path: path.to_path_buf(),
@@ -126,10 +123,7 @@ fn scan_task(
     };
     match task {
         Task::Dir(dir) => {
-            for entry in walkdir::WalkDir::new(dir)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|_e| !stop.is_set())
+            for entry in walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_entry(|_e| !stop.is_set())
             {
                 let Ok(entry) = entry else { continue };
                 let ft = entry.file_type();
@@ -153,13 +147,7 @@ fn scan_task(
 /// задания обрывается на следующем же входе, не дожидаясь конца дерева.
 fn count_task(task: &Task, stop: &StopToken) -> usize {
     match task {
-        Task::Dir(dir) => walkdir::WalkDir::new(dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|_e| !stop.is_set())
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .count(),
+        Task::Dir(dir) => walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_entry(|_e| !stop.is_set()).filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).count(),
         Task::RootFiles(files) => files.len(),
     }
 }
@@ -185,14 +173,11 @@ fn run_scan_tasks(
         // Стоп получен во время предподсчёта — скан не начинаем.
         return (total_files, Vec::new());
     }
-    let per_task: Vec<(Vec<FileRow>, ScanStats)> = tasks
-        .par_iter()
-        .map(|t| scan_task(t, stop, counter, total_files, log))
-        .collect();
+    let per_task: Vec<(Vec<FileRow>, ScanStats)> = tasks.par_iter().map(|t| scan_task(t, stop, counter, total_files, log)).collect();
     (total_files, per_task)
 }
 
-/// Сканирует `root` в CSV-отчёт (порт `scan_folder`).
+/// Сканирует `root` в CSV-отчёт.
 ///
 /// `master_file` — общий файл пакетного сканирования (append); если `None`,
 /// создаётся новый `files_info_<имя>_<timestamp>.csv`.
@@ -217,15 +202,9 @@ pub fn scan_folder(
         em!(log, "scan_not_dir", root.display());
         return None;
     }
-    let safe_name: String = root
-        .file_name()
-        .map(|n| {
-            n.to_string_lossy()
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
-                .collect::<String>()
-        })
-        .unwrap_or_default();
+    let safe_name: String = root.file_name().map(|n| {
+            n.to_string_lossy().chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_').collect::<String>()
+        }).unwrap_or_default();
     let safe_name = safe_name.replace(' ', "_");
     let ts = timestamp();
     let output_file = match master_file {
@@ -235,11 +214,7 @@ pub fn scan_folder(
     let is_master = master_file.is_some();
     let new_file = output_file.metadata().map(|m| m.len() == 0).unwrap_or(true);
 
-    let mut file = match File::options()
-        .create(true)
-        .append(is_master)
-        .write(!is_master)
-        .open(&output_file)
+    let mut file = match File::options().create(true).append(is_master).write(!is_master).open(&output_file)
     {
         Ok(f) => f,
         Err(e) => {
@@ -248,20 +223,17 @@ pub fn scan_folder(
         }
     };
     if new_file {
-        let _ = file.write_all(b"\xEF\xBB\xBF"); // UTF-8 BOM (utf-8-sig, как в Python)
+        let _ = file.write_all(b"\xEF\xBB\xBF"); // UTF-8 BOM
     }
-    // CRLF — как lineterminator по умолчанию у csv-модуля Python (byte-parity)
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b';')
-        .terminator(csv::Terminator::CRLF)
-        .from_writer(BufWriter::new(file));
+    // CRLF — как требует формат отчёта
+    let mut writer = csv::WriterBuilder::new().delimiter(b';').terminator(csv::Terminator::CRLF).from_writer(BufWriter::new(file));
     if !is_master || new_file {
         let _ = writer.write_record([
             "source_root", "full_path", "parent_dir", "name", "extension", "size_mb", "index_ops",
         ]);
     }
 
-    // Задачи: топ-подпапки + собственные файлы корня (как в Python).
+    // Задачи: топ-подпапки + собственные файлы корня.
     let mut tasks: Vec<Task> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&root) {
         for entry in rd.flatten() {
@@ -270,13 +242,7 @@ pub fn scan_folder(
             }
         }
     }
-    let root_files: Vec<PathBuf> = std::fs::read_dir(&root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
+    let root_files: Vec<PathBuf> = std::fs::read_dir(&root).into_iter().flatten().flatten().filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false)).map(|e| e.path()).collect();
     if !root_files.is_empty() {
         tasks.push(Task::RootFiles(root_files));
     }
@@ -287,9 +253,7 @@ pub fn scan_folder(
     // сканирование идут в ЭТОМ пуле параллельно по топ-подпапкам —
     // на сетевых ресурсах это заметно быстрее одиночного предподсчёта.
     let counter = AtomicUsize::new(0);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(max_threads.clamp(1, 512))
-        .build();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(max_threads.clamp(1, 512)).build();
     let (total_files, per_task) = match pool {
         Ok(ref p) => p.install(|| run_scan_tasks(&tasks, stop, &counter, log)),
         Err(_) => run_scan_tasks(&tasks, stop, &counter, log),

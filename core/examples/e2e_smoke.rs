@@ -1,16 +1,16 @@
-//! сквозной e2e-смоук всех 7 режимов FileManager (core).
+//! Сквозная проверка всех 7 режимов (ядро).
 //!
 //! Создаёт в каталоге temp реальные файлы/папки, запускает каждую
 //! функцию приложения на них и проверяет результаты (структуру,
 //! CSV-отчёты с BOM/разделителем, статистику, возобновление копирования).
 //!
-//! Запуск: `cargo run --example e2e_smoke -p filemanager-core`
+//! Запуск: `cargo run --example e2e_smoke -p remont-core`
 //! Выходит с кодом 1, если хоть одна проверка упала.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use filemanager_core::{
+use remont_core::{
     archive_folders, cleanup_empty_folders, compare_folders, copy_files_from_list,
     create_folders, delete_paths, find_duplicates_multi, scan_folder, stdout_sink,
     CompareMethod, HashAlgo, StopToken,
@@ -209,7 +209,7 @@ fn main() {
     all_ok &= check("3 файла в отчёте", lines.len() == 4);
     let only_a = lines.iter().find(|l| l.starts_with("only_a.txt;")).unwrap();
     all_ok &= check("только в A: different=Yes", only_a.ends_with(";Yes"));
-    all_ok &= check("только в A: path_in_b = N/A (как в Python)", only_a.split(';').nth(2) == Some("N/A"));
+    all_ok &= check("только в A: path_in_b = N/A", only_a.split(';').nth(2) == Some("N/A"));
     let same = lines.iter().find(|l| l.starts_with("same.txt;")).unwrap();
     all_ok &= check("идентичные: different=No", same.ends_with(";No"));
     let changed = lines.iter().find(|l| l.starts_with("changed.txt;")).unwrap();
@@ -248,7 +248,7 @@ fn main() {
     );
     let rlog = tmp.join("from_to.resume.json");
     // resume=true в обоих запусках: кэш возобновления пишется только в этом
-    // режиме (как в Python), и повторный запуск обязан всё пропустить.
+    // режиме, и повторный запуск обязан всё пропустить.
     let copied = copy_files_from_list(&kcfg, &rlog, 16, true, &stop, &log);
     all_ok &= check("a.txt на месте", dst.join("a.txt").exists());
     all_ok &= check(
@@ -263,7 +263,7 @@ fn main() {
     }
     #[cfg(not(windows))]
     {
-        // Парность с Python: shutil.copy2 НЕ копирует каталоги (ошибка в логе)
+        // Каталог как источник копии не копируется (ошибка в логе)
         all_ok &= check(
             "скопировано 1 задача (папка не копируется на не-Windows — парность с shutil.copy2)",
             copied == 1,

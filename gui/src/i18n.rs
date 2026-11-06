@@ -1,7 +1,7 @@
 //! Переводы строк GUI. Ключи: `t(lang, "key")` → `&'static str`.
-//! Использует `Lang` из `filemanager_core::i18n`.
+//! Использует `Lang` из `remont_core::i18n`.
 
-use filemanager_core::i18n::Lang;
+use remont_core::i18n::Lang;
 
 pub fn t(lang: Lang, key: &'static str) -> &'static str {
     match lang {
@@ -439,7 +439,7 @@ static HELP_RU: [HelpText; 8] = [
         config: "Документы/RemontExplorer/config/folders_to_cleanup.txt",
         purpose: "Удаляет пустые вложенные папки в указанных каталогах. Дерево обрабатывается одним проходом снизу вверх.",
         cfg_format: "Список папок — по одной на строку. Если пуст, можно выбрать папку в диалоге.",
-        details: "Удаляются только действительно пустые папки — папки с файлами (включая скрытые) не трогаются. Родительская папка, ставшая пустой только после удаления дочерних, в этом же проходе НЕ удаляется (та же семантика, что в Python-версии) — при необходимости запустите режим повторно. Для списка из нескольких папок выполняется последовательная очистка, итоги суммируются.",
+        details: "Удаляются только действительно пустые папки — папки с файлами (включая скрытые) не трогаются. Родительская папка, ставшая пустой только после удаления дочерних, в этом же проходе НЕ удаляется (та же логика при повторном запуске) — при необходимости запустите режим повторно. Для списка из нескольких папок выполняется последовательная очистка, итоги суммируются.",
         example: "D:\\Data\\EmptyTree\nE:\\Temp\\Subfolders",
         result_example: "До:\nD:\\Data\\EmptyTree\\\n    a\\\n        b\\              (пустая)\n    c\\                  (пустая)\n    d.txt               (файл — не трогается)\n\nПосле:\nD:\\Data\\EmptyTree\\\n    a\\                  (осталась: в момент обхода\n                         содержала папку b)\n    d.txt\n\nВ консоли:\nНайдено пустых папок: 2\nУдалена пустая папка: D:\\Data\\EmptyTree\\a\\b\nУдалена пустая папка: D:\\Data\\EmptyTree\\c",
     },
@@ -514,7 +514,7 @@ static HELP_EN: [HelpText; 8] = [
         config: "<Documents>/RemontExplorer/config/folders_to_cleanup.txt",
         purpose: "Deletes empty nested folders inside the given directories. The tree is processed in a single bottom-up pass.",
         cfg_format: "List of folders — one per line. If empty, a folder can be picked in a dialog.",
-        details: "Only truly empty folders are deleted — folders containing files (including hidden ones) are left untouched. A parent folder that became empty only after its children were deleted is NOT removed in the same pass (the same semantics as in the Python version) — run the mode again if needed. For a list of several folders the cleanup runs sequentially and the totals are summed up.",
+        details: "Only truly empty folders are deleted — folders containing files (including hidden ones) are left untouched. A parent folder that became empty only after its children were deleted is NOT removed in the same pass (the same behaviour on a repeated run) — run the mode again if needed. For a list of several folders the cleanup runs sequentially and the totals are summed up.",
         example: "D:\\\\Data\\\\EmptyTree\nE:\\\\Temp\\\\Subfolders",
         result_example: "Before:\nD:\\\\Data\\\\EmptyTree\\\\\n    a\\\\\n        b\\\\              (empty)\n    c\\\\                  (empty)\n    d.txt               (file — left untouched)\n\nAfter:\nD:\\\\Data\\\\EmptyTree\\\\\n    a\\\\                  (kept: it still held folder b\n                         when it was visited)\n    d.txt\n\nIn the console:\nFound empty folders: 2\nDeleted empty folder: D:\\\\Data\\\\EmptyTree\\\\a\\\\b\nDeleted empty folder: D:\\\\Data\\\\EmptyTree\\\\c",
     },

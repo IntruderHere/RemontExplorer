@@ -1,5 +1,5 @@
-//! Создание структуры папок (порт `create_folders`) и упаковка в ZIP
-//! (порт `archive_folders`).
+//! Создание структуры папок и упаковка в ZIP
+//!.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
@@ -15,9 +15,9 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-/// Создаёт папки из списка (порт `create_folders`).
+/// Создаёт папки из списка.
 /// Возвращает все созданные папки ВКЛЮЧАЯ родительские уровни
-/// (счётчик честный — фикс из Python-версии сохранён).
+/// (счётчик отражает реально созданные папки).
 pub fn create_folders(paths: &[PathBuf], stop: &StopToken, log: &LogSink) -> Vec<PathBuf> {
     let mut created: Vec<PathBuf> = Vec::new();
     let mut all_created: BTreeSet<PathBuf> = BTreeSet::new();
@@ -93,7 +93,7 @@ fn verify_zip(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Упаковывает папки в ZIP с общей базой как корнем (порт `archive_folders`).
+/// Упаковывает папки в ZIP с общей базой как корнем.
 /// С проверкой целостности; опционально удаляет оригиналы.
 /// Возвращает путь архива или `None` при ошибке (оригиналы сохраняются).
 pub fn archive_folders(
@@ -158,9 +158,7 @@ pub fn archive_folders(
             if ft.is_dir() {
                 let name = format!("{arcname}/");
                 if written.insert(name.clone()) {
-                    let opts = zip::write::SimpleFileOptions::default()
-                        .compression_method(zip::CompressionMethod::Deflated)
-                        .unix_permissions(0o755);
+                    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).unix_permissions(0o755);
                     if zip.start_file(&name, opts).is_err() {
                         ok = false;
                         break;
@@ -170,9 +168,7 @@ pub fn archive_folders(
                 if !written.insert(arcname.clone()) {
                     continue;
                 }
-                let opts = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated)
-                    .unix_permissions(0o644);
+                let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).unix_permissions(0o644);
                 if let Err(e) = zip.start_file(&arcname, opts) {
                     em!(log, "err_originals_preserved", e.to_string());
                     ok = false;

@@ -2,7 +2,7 @@
 //!
 //! Rust std на Windows использует wide-API, но НЕ добавляет префикс `\\?\`
 //! и НЕ снимает 260-символьный лимит (без LongPathsEnabled) — поэтому
-//! логика префикса портирована явно (как в Python `normalize_long_path`).
+//! логика префикса реализована явно.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ pub fn normalize_long_path(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-/// «Мягкий» resolve (аналог `Path.resolve()` Python, non-strict):
+/// «Мягкий» resolve пути (без требования существования):
 /// канонизирует настолько, насколько путь существует. Направление может
 /// ещё не существовать.
 pub fn resolve_loose(p: &Path) -> PathBuf {
@@ -54,11 +54,7 @@ pub fn resolve_loose(p: &Path) -> PathBuf {
 
 /// mtime в секундах от UNIX-epoch (0.0, если недоступен).
 pub fn modified_secs(meta: &std::fs::Metadata) -> f64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 /// Самый верхний предок `path`, присутствующий в списке путей пользователя.
@@ -84,7 +80,7 @@ pub fn topmost_listed_ancestor(path: &Path, paths: &[PathBuf]) -> Option<PathBuf
 }
 
 /// Удаляет цепочку пустых родителей вверх от `path`, не заходя за `boundary`.
-/// Возвращает число удалённых папок (порт `_delete_empty_parents`).
+/// Возвращает число удалённых папок.
 /// Оба пути канонизируются — иначе сравнение с границей ломается на
 /// симлинках (например, macOS /tmp -> /private/tmp).
 pub fn delete_empty_parents(path: &Path, boundary: Option<&Path>) -> usize {

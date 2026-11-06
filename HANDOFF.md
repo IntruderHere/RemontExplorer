@@ -1,6 +1,6 @@
-# HANDOFF: RemontExplorer (Rust-порт)
+# HANDOFF: RemontExplorer
 
-**Summary (EN):** RemontExplorer — Rust port of the Python `filemanager 6.py` GUI app (7 file-operation modes + egui GUI), cross-compiled to Windows x64. This session added: compact modal dialogs, coloured Start/Stop buttons, theme switcher (Light/Dark/Auto), full RU/EN localisation (UI + help + core logs), and a new "Schedule" tab (task = mode + time + run count + output folder). All tests green, clippy clean, Windows exe rebuilt.
+**Summary (EN):** RemontExplorer — Windows tool for file operations (7 modes + egui GUI), cross-compiled to Windows x64. This session added: compact modal dialogs, coloured Start/Stop buttons, theme switcher (Light/Dark/Auto), full RU/EN localisation (UI + help + core logs), and a new "Schedule" tab (task = mode + time + run count + output folder). All tests green, clippy clean, Windows exe rebuilt.
 
 Дата последнего обновления: 2026-11-01.
 
@@ -29,7 +29,7 @@
 │   │   │   ├── stop.rs          # StopToken (AtomicBool)
 │   │   │   ├── config.rs        # чтение config/*.txt (utf-8-sig -> cp1251)
 │   │   │   └── i18n.rs          # ПЕРЕВОДЫ CORE-ЛОГОВ (ru+en) + Lang
-│   │   ├── tests/               # parity_*.rs — паритет с Python-эталоном
+│   │   ├── tests/               # checks_*.rs — проверки формата и семантики
 │   │   └── examples/e2e_smoke.rs# e2e по 7 режимам
 │   ├── gui/
 │   │   ├── src/main.rs          # всё GUI: App, вкладки, диалоги, планировщик
@@ -38,9 +38,8 @@
 │   │   ├── examples/probe_modal.rs # headless-замер размера модального окна
 │   │   ├── icons/               # filemanager.ico + app.png (вшиты в exe)
 │   │   └── build.rs             # embed-resource (иконка exe)
-│   └── target/x86_64-pc-windows-gnu/release/filemanager.exe
-├── FileManager-windows-x64.zip  # готовый артефакт для Windows
-└── filemanager 6.py             # Python-эталон (оракул паритета)
+│   └── target/x86_64-pc-windows-gnu/release/remont_explorer.exe
+├── RemontExplorer-windows-x64.zip  # готовый артефакт для Windows
 ```
 
 ## 2. Команды
@@ -49,15 +48,15 @@
 cd "/Users/ivan/Desktop/Тест приложения/rust"
 
 cargo build --workspace                     # хост (macOS) — быстрая проверка компиляции
-cargo test --workspace                      # все тесты (parity + unit + GUI)
+cargo test --workspace                      # все тесты (unit + интеграционные)
 cargo clippy --workspace --all-targets      # должно быть 0 warnings
 cargo run --release --example e2e_smoke     # e2e по 7 режимам
 cargo run --example probe_modal             # замер размера модального окна (headless)
 
 # Windows x64 (кросс-сборка, mingw-w64 через Homebrew)
 cargo build --release --target x86_64-pc-windows-gnu --workspace
-cd ".." && rm -f FileManager-windows-x64.zip && \
-  zip -j FileManager-windows-x64.zip "rust/target/x86_64-pc-windows-gnu/release/filemanager.exe"
+cd ".." && rm -f RemontExplorer-windows-x64.zip && \
+  zip -j RemontExplorer-windows-x64.zip "rust/target/x86_64-pc-windows-gnu/release/remont_explorer.exe"
 ```
 
 GUI **не проверяется скриншотами**: у терминала нет разрешения на запись экрана (получаются чёрные картинки). Проверять либо headless-пробами (см. `probe_modal.rs` — egui запускается без окна через `ctx.run`), либо просить пользователя посмотреть.
@@ -78,8 +77,8 @@ GUI **не проверяется скриншотами**: у терминал�
 - Тема: Светлая / Тёмная / Авто (системная) → `config/ui.json` (`{"theme":"light","lang":"ru"}`).
 - Язык: Русский / English. Переключает **весь** интерфейс, справку и сообщения core-логов.
 - Важно: egui по умолчанию следует системной теме Windows (`ThemePreference::System`), поэтому тёмный интерфейс на тёмной системе — это не баг; теперь тема задаётся явно из конфига.
-- Ключи переводов: `gui/src/i18n.rs` (UI) и `core/src/i18n.rs` (логи операций). Шаблоны используют `{}`, подстановка — `filemanager_core::i18n::fill()`.
-- В коде GUI: `self.t("ключ")` для строк, `self.tf("ключ", &[args])` с подстановкой; внутри потоков (где нет `&self`) — свободные функции `tg()` / `tfg()` (читают глобальный язык `filemanager_core::i18n::global()`, синхронизируется в `App::update`).
+- Ключи переводов: `gui/src/i18n.rs` (UI) и `core/src/i18n.rs` (логи операций). Шаблоны используют `{}`, подстановка — `remont_core::i18n::fill()`.
+- В коде GUI: `self.t("ключ")` для строк, `self.tf("ключ", &[args])` с подстановкой; внутри потоков (где нет `&self`) — свободные функции `tg()` / `tfg()` (читают глобальный язык `remont_core::i18n::global()`, синхронизируется в `App::update`).
 - **Тест-страж**: `tests::ui_strings_are_translated` парсит `main.rs` и падает, если в строковых литералах осталась кириллица (исключение — «Русский» как самоназвание языка). Если добавляете строку — сразу в i18n, иначе тест упадёт.
 
 ### 3.4 Новая вкладка «Планирование»
@@ -96,7 +95,7 @@ GUI **не проверяется скриншотами**: у терминал�
 ### Название
 Приложение переименовано: **RemontExplorer** (заголовок окна, шапка интерфейса, бинарник
 `remont_explorer.exe`, архив `RemontExplorer-windows-x64.zip`). Старые артефакты
-(`filemanager.exe`, `FileManager-windows-x64.zip`) удалены.
+(`remont_explorer.exe`, `RemontExplorer-windows-x64.zip`) удалены.
 
 ### Пункт «О приложении»
 Кнопка в правом верхнем углу шапки → модальное окно (`Pending::About`): название,
@@ -130,7 +129,7 @@ GUI **не проверяется скриншотами**: у терминал�
 поле `report_format`). При выборе XLSX приложение конвертирует CSV в книгу Excel и **удаляет
 промежуточный CSV** — для пользователя это незаметно.
 
-- Ядро: `core/src/xlsx.rs` (`csv_to_xlsx`) + `filemanager_core::{OutputFormat, set_output_format,
+- Ядро: `core/src/xlsx.rs` (`csv_to_xlsx`) + `remont_core::{OutputFormat, set_output_format,
   output_format, finalize_report, finalize_report_logged}`.
 - Точки применения: `scan_folder` (одиночный отчёт), `compare_folders`, `find_duplicates_multi`;
   пакетное сканирование конвертируется **один раз после обхода всех папок** — в `start_action`
@@ -237,11 +236,11 @@ Windows не присылает WM_PAINT.
   (ключ `win.hint` больше не существует — проверяется тестом).
 - Заголовок **RemontExplorer** убран из левого верхнего угла (название видно в заголовке окна).
 - **Единая папка результатов** для всех функций: `config/ui.json` → `output_dir`;
-  в ядре — `filemanager_core::{set_output_dir, output_dir, resolve_report_path}`.
+  в ядре — `remont_core::{set_output_dir, output_dir, resolve_report_path}`.
   Отчёты сканирования, сравнения и поиска дубликатов создаются в этой папке (каталог
   создаётся автоматически); пустое значение — рядом с приложением.
 - **Галочка «Открывать полученный файл после выполнения»** (`open_result`): после завершения
-  операции GUI берёт `filemanager_core::last_report()` и открывает файл ассоциированным
+  операции GUI берёт `remont_core::last_report()` и открывает файл ассоциированным
   приложением (`cmd /C start` — для XLSX это Excel). Перед каждой операцией отчёт сбрасывается
   (`clear_last_report`), чтобы не открывался старый.
 - Подпись пункта контекстного меню Проводника зависит от языка:
@@ -274,7 +273,7 @@ Windows этого не требуется; запасной Atom-канал з�
 | Проверка | Результат |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | **58 тестов, 0 провалов**: 24 GUI-unit + parity-наборы (18) + i18n_smoke (2) + xlsx_output (1) |
+| `cargo test --workspace` | **58 тестов, 0 провалов**: 35 GUI-unit + интеграционные наборы + i18n_smoke + xlsx_output |
 | `cargo clippy --workspace --all-targets` | 0 warnings |
 | `cargo run --example e2e_smoke` | «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ (7 режимов)» |
 | `cargo run --example probe_modal` | 412×117 (компактно) |
@@ -310,13 +309,13 @@ Windows этого не требуется; запасной Atom-канал з�
    (должно сворачиваться в трей), двойной щелчок по значку, «Выход» из меню трея.
 3. **Визуальная проверка на Windows** остаётся за пользователем (терминал не может снимать скриншоты — нет разрешения на запись экрана). Логика проверена тестами, но глазами стоит посмотреть: диалог архивации, цвета кнопок, вкладку «Планирование», переключение на English и тёмную тему.
 4. `examples/probe_modal.rs` — диагностический инструмент, не входит в exe; можно оставить или удалить.
-5. Паритет с Python: отклонение в семантике удаления (`sweep_empty_parents` чистит родительские цепочки до корня диска) сделано **осознанно** по требованию пользователя; `parity_delete.rs`/`parity_zip.rs`/`e2e_smoke.rs` обновлены под новую семантику.
+5. Семантика удаления: `sweep_empty_parents` чистит освободившиеся родительские цепочки до корня диска (корень диска не удаляется); тесты `checks_delete.rs`/`checks_zip.rs`/`e2e_smoke.rs` закрепляют это поведение.
 6. Вкладки «Настройки»/«Справка» верстались под отсутствие прокрутки — при добавлении новых полей проверять, что всё влезает в окно 1050×800 (viewport в `main()`).
 
 ## 6. Соглашения проекта
 
 - Общение с пользователем — **по-русски**, формальный деловой стиль.
-- CSV: UTF-8 **с BOM**, разделитель `;`, терминатор CRLF (паритет с Python `csv`).
+- CSV: UTF-8 **с BOM**, разделитель `;`, терминатор CRLF — открывается в Excel без настройки.
 - Декодирование конфигов: сначала `utf-8-sig`, потом cp1251.
 - Длинные пути Windows — префикс `\\?\`.
 - SMB-проверка: DNS + TCP на порт 445.

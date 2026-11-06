@@ -5,7 +5,7 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("windows") {
         println!("cargo:rerun-if-changed=icons/app.rc");
-        println!("cargo:rerun-if-changed=icons/filemanager.ico");
+        println!("cargo:rerun-if-changed=icons/remont_explorer.ico");
         embed_resource::compile("icons/app.rc", embed_resource::NONE);
     }
 }

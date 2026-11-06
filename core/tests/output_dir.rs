@@ -1,13 +1,13 @@
 //! Единая папка результатов: отчёты всех операций пишутся туда,
 //! а путь последнего отчёта доступен GUI (для настройки «открыть файл»).
 
-use filemanager_core::{
+use remont_core::{
     clear_last_report, last_report, scan_folder, set_output_dir, Sink, StopToken,
 };
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-fn quiet() -> filemanager_core::LogSink {
+fn quiet() -> remont_core::LogSink {
     Arc::new(Mutex::new(Sink::text_only(|_| {})))
 }
 

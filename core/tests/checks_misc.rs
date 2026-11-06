@@ -1,8 +1,8 @@
-//! Parity-тесты: дубликаты и очистка пустых папок.
+//! Тесты: дубликаты и очистка пустых папок.
 
 use std::fs;
 
-use filemanager_core::{
+use remont_core::{
     cleanup_empty_folders, find_duplicates_multi, stdout_sink, HashAlgo, StopToken,
 };
 use tempfile::TempDir;
@@ -24,8 +24,7 @@ fn duplicates_finds_same_content() {
         Some(&out),
         &stop,
         &log,
-    )
-    .expect("дубликаты");
+    ).expect("дубликаты");
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].len(), 2);

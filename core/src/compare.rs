@@ -1,9 +1,8 @@
-//! Сравнение папок по именам файлов (порт `compare_folders` +
-//! `_collect_files_by_name` из Python-версии).
+//! Сравнение папок по именам файлов.
 //!
 //! Методы: размер+дата (по умолчанию), побайтовое, хеш SHA-256/MD5.
 //! Глубокое сравнение — параллельно (rayon), стоп — между задачами.
-//! Отчёт: UTF-8 BOM, разделитель `;`, колонки 1:1 с Python.
+//! Отчёт: UTF-8 с BOM, разделитель `;`, колонки фиксированы.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -24,7 +23,7 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-/// Метод сравнения (порт диалога выбора в Python-версии).
+/// Метод сравнения (выбирается в диалоге).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareMethod {
     /// Размер и дата (по умолчанию; порог различия по mtime — 1 с).
@@ -59,18 +58,14 @@ fn mtime_iso(meta: &fs::Metadata) -> String {
     }
 }
 
-/// Читает пары папок из конфига (порт разбора `compare_folders`):
+/// Читает пары папок из конфига:
 /// строки вида `A;B` либо поочерёдные строки A, B, A, B...
 fn read_compare_pairs(path: &Path) -> Vec<(PathBuf, PathBuf)> {
     let Ok(bytes) = fs::read(path) else {
         return Vec::new();
     };
     let text = crate::config::decode_config(&bytes);
-    let raw: Vec<String> = text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let raw: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
     if raw.is_empty() {
         return Vec::new();
     }
@@ -97,9 +92,9 @@ fn read_compare_pairs(path: &Path) -> Vec<(PathBuf, PathBuf)> {
     pairs
 }
 
-/// Сбор файлов папки по именам (порт `_collect_files_by_name`):
+/// Сбор файлов папки по именам:
 /// имя -> {путь, размер, mtime}. Корневые файлы имеют приоритет
-/// (как в Python: собирались в основном потоке первыми), далее —
+/// (сначала собираются в основном потоке), далее —
 /// топ-подпапки параллельно; первое вхождение имени побеждает.
 fn collect_files_by_name(root: &Path, stop: &StopToken) -> BTreeMap<String, FileInfo> {
     let mut result: BTreeMap<String, FileInfo> = BTreeMap::new();
@@ -122,22 +117,11 @@ fn collect_files_by_name(root: &Path, stop: &StopToken) -> BTreeMap<String, File
             });
         }
     }
-    let subdirs: Vec<PathBuf> = fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
+    let subdirs: Vec<PathBuf> = fs::read_dir(root).into_iter().flatten().flatten().filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)).map(|e| e.path()).collect();
     let stop_r = stop.clone();
-    let maps: Vec<BTreeMap<String, FileInfo>> = subdirs
-        .into_par_iter()
-        .map(|dir| {
+    let maps: Vec<BTreeMap<String, FileInfo>> = subdirs.into_par_iter().map(|dir| {
             let mut local = BTreeMap::new();
-            for entry in walkdir::WalkDir::new(&dir)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|_e| !stop_r.is_set())
+            for entry in walkdir::WalkDir::new(&dir).follow_links(false).into_iter().filter_entry(|_e| !stop_r.is_set())
             {
                 let Ok(entry) = entry else { continue };
                 let ft = entry.file_type();
@@ -145,17 +129,14 @@ fn collect_files_by_name(root: &Path, stop: &StopToken) -> BTreeMap<String, File
                     continue;
                 }
                 let Ok(st) = entry.metadata() else { continue };
-                local
-                    .entry(entry.file_name().to_string_lossy().into_owned())
-                    .or_insert_with(|| FileInfo {
+                local.entry(entry.file_name().to_string_lossy().into_owned()).or_insert_with(|| FileInfo {
                         path: entry.path().to_path_buf(),
                         size: st.len(),
                         mtime: modified_secs(&st),
                     });
             }
             local
-        })
-        .collect();
+        }).collect();
     for m in maps {
         for (name, info) in m {
             result.entry(name).or_insert(info);
@@ -176,7 +157,7 @@ struct Row {
     deep: Option<usize>,
 }
 
-/// Сравнивает пары папок из конфига (порт `compare_folders`).
+/// Сравнивает пары папок из конфига.
 /// Возвращает пути сохранённых отчётов.
 pub fn compare_folders(
     config: &Path,
@@ -292,18 +273,10 @@ pub fn compare_folders(
             }
             rows.push(Row {
                 file_name: name.clone(),
-                path_in_a: a
-                    .map(|i| i.path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "N/A".into()),
-                path_in_b: b
-                    .map(|i| i.path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "N/A".into()),
-                size_a_mb: a
-                    .map(|i| format!("{:.2}", i.size as f64 / (1024.0 * 1024.0)))
-                    .unwrap_or_default(),
-                size_b_mb: b
-                    .map(|i| format!("{:.2}", i.size as f64 / (1024.0 * 1024.0)))
-                    .unwrap_or_default(),
+                path_in_a: a.map(|i| i.path.to_string_lossy().into_owned()).unwrap_or_else(|| "N/A".into()),
+                path_in_b: b.map(|i| i.path.to_string_lossy().into_owned()).unwrap_or_else(|| "N/A".into()),
+                size_a_mb: a.map(|i| format!("{:.2}", i.size as f64 / (1024.0 * 1024.0))).unwrap_or_default(),
+                size_b_mb: b.map(|i| format!("{:.2}", i.size as f64 / (1024.0 * 1024.0))).unwrap_or_default(),
                 modified_a: a.and_then(|i| fs::metadata(&i.path).ok()).map(|m| mtime_iso(&m)).unwrap_or_default(),
                 modified_b: b.and_then(|i| fs::metadata(&i.path).ok()).map(|m| mtime_iso(&m)).unwrap_or_default(),
                 different,
@@ -322,16 +295,14 @@ pub fn compare_folders(
             let deep_done_r = std::sync::Arc::clone(&deep_done);
             let base = completed;
             let deep_total = deep_tasks.len();
-            let results: Vec<bool> = deep_tasks
-                .par_iter()
-                .map(|t| {
+            let results: Vec<bool> = deep_tasks.par_iter().map(|t| {
                     let r = if stop_r.is_set() {
                         false
                     } else {
                         match method_r {
                             CompareMethod::Hash(algo) => match (hash_file(&t.a, algo), hash_file(&t.b, algo)) {
                                 (Some(ha), Some(hb)) => ha != hb,
-                                _ => true, // ошибка чтения = «различаются» (как в Python)
+                                _ => true, // ошибка чтения = «различаются»
                             },
                             CompareMethod::Binary => files_differ_binary(&t.a, &t.b),
                             CompareMethod::SizeDate => false,
@@ -342,8 +313,7 @@ pub fn compare_folders(
                         emit_progress(&log_r, base + done, total_units);
                     }
                     r
-                })
-                .collect();
+                }).collect();
             completed += deep_total;
             for row in rows.iter_mut() {
                 if let Some(d) = row.deep.take() {
@@ -358,22 +328,17 @@ pub fn compare_folders(
         let write_report = |out_path: &Path, rows: &[Row]| -> Result<(), String> {
             let mut file = File::create(out_path).map_err(|e| e.to_string())?;
             file.write_all(b"\xEF\xBB\xBF").map_err(|e| e.to_string())?;
-            let mut w = csv::WriterBuilder::new()
-                .delimiter(b';')
-                .terminator(csv::Terminator::CRLF)
-                .from_writer(BufWriter::new(file));
+            let mut w = csv::WriterBuilder::new().delimiter(b';').terminator(csv::Terminator::CRLF).from_writer(BufWriter::new(file));
             w.write_record([
                 "file_name", "path_in_a", "path_in_b", "size_a_mb", "size_b_mb",
                 "modified_a", "modified_b", "different",
-            ])
-            .map_err(|e| e.to_string())?;
+            ]).map_err(|e| e.to_string())?;
             for r in rows {
                 w.write_record([
                     r.file_name.as_str(), r.path_in_a.as_str(), r.path_in_b.as_str(),
                     r.size_a_mb.as_str(), r.size_b_mb.as_str(), r.modified_a.as_str(),
                     r.modified_b.as_str(), r.different.as_str(),
-                ])
-                .map_err(|e| e.to_string())?;
+                ]).map_err(|e| e.to_string())?;
             }
             w.flush().map_err(|e| e.to_string())
         };

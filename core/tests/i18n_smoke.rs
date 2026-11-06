@@ -1,4 +1,4 @@
-use filemanager_core::i18n::{en, fill, tr, Lang};
+use remont_core::i18n::{en, fill, tr, Lang};
 
 #[test]
 fn runtime_fmt_str() {

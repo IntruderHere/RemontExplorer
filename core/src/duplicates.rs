@@ -1,5 +1,4 @@
-//! Поиск дубликатов (порт `find_duplicates` / `find_duplicates_multi` /
-//! `_find_duplicates_core` из Python-версии).
+//! Поиск дубликатов.
 //!
 //! Алгоритм: группировка по размеру -> хеширование кандидатов (rayon) ->
 //! группировка по хешу. Отчёт: UTF-8 BOM, разделитель `;`.
@@ -26,7 +25,7 @@ struct GroupItem {
     hash: String,
 }
 
-/// Пакетный поиск дубликатов в наборе папок (порт `find_duplicates_multi`).
+/// Пакетный поиск дубликатов в наборе папок.
 /// Возвращает группы дубликатов (пути).
 pub fn find_duplicates_multi(
     paths: &[PathBuf],
@@ -48,19 +47,14 @@ pub fn find_duplicates_multi(
     let col_done = std::sync::Arc::new(AtomicUsize::new(0));
     let col_done_r = std::sync::Arc::clone(&col_done);
     let n_paths = paths.len();
-    let collected: Vec<Vec<(PathBuf, u64)>> = paths
-        .par_iter()
-        .map(|p| {
+    let collected: Vec<Vec<(PathBuf, u64)>> = paths.par_iter().map(|p| {
             let mut out = Vec::new();
             if !stop_r.is_set() {
                 if !p.is_dir() {
                     em!(&log_r, "dup_skip_nondir", p.display());
                 } else {
                     em!(&log_r, "dup_scanning", p.display());
-                    for entry in walkdir::WalkDir::new(p)
-                        .follow_links(false)
-                        .into_iter()
-                        .filter_entry(|_e| !stop_r.is_set())
+                    for entry in walkdir::WalkDir::new(p).follow_links(false).into_iter().filter_entry(|_e| !stop_r.is_set())
                     {
                         let Ok(entry) = entry else { continue };
                         let ft = entry.file_type();
@@ -75,8 +69,7 @@ pub fn find_duplicates_multi(
             let done = col_done_r.fetch_add(1, Ordering::Relaxed) + 1;
             emit_progress(&log_r, done, n_paths);
             out
-        })
-        .collect();
+        }).collect();
     let files: Vec<(PathBuf, u64)> = collected.into_iter().flatten().collect();
 
     if files.is_empty() {
@@ -106,9 +99,7 @@ pub fn find_duplicates_multi(
     let hash_done = std::sync::Arc::new(AtomicUsize::new(0));
     let hash_done_r = std::sync::Arc::clone(&hash_done);
     emit_progress(log, 0, total_to_hash);
-    let hashes: Vec<(PathBuf, Option<String>)> = paths_to_hash
-        .par_iter()
-        .map(|p| {
+    let hashes: Vec<(PathBuf, Option<String>)> = paths_to_hash.par_iter().map(|p| {
             let h = if stop_r.is_set() {
                 None
             } else {
@@ -119,8 +110,7 @@ pub fn find_duplicates_multi(
                 emit_progress(&log_r, done, total_to_hash);
             }
             (p.clone(), h)
-        })
-        .collect();
+        }).collect();
 
     let mut by_hash: std::collections::BTreeMap<String, Vec<GroupItem>> =
         std::collections::BTreeMap::new();
@@ -153,18 +143,12 @@ pub fn find_duplicates_multi(
         }
     }
 
-    let out = output_csv
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| crate::resolve_report_path(format!("duplicates_{}.csv", timestamp())));
+    let out = output_csv.map(|p| p.to_path_buf()).unwrap_or_else(|| crate::resolve_report_path(format!("duplicates_{}.csv", timestamp())));
     let write_report = |out: &Path, groups: &[Vec<GroupItem>]| -> Result<(), String> {
         let mut file = fs::File::create(out).map_err(|e| e.to_string())?;
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| e.to_string())?;
-        let mut w = csv::WriterBuilder::new()
-            .delimiter(b';')
-            .terminator(csv::Terminator::CRLF)
-            .from_writer(BufWriter::new(file));
-        w.write_record(["group_id", "full_path", "size_bytes", "hash"])
-            .map_err(|e| e.to_string())?;
+        let mut w = csv::WriterBuilder::new().delimiter(b';').terminator(csv::Terminator::CRLF).from_writer(BufWriter::new(file));
+        w.write_record(["group_id", "full_path", "size_bytes", "hash"]).map_err(|e| e.to_string())?;
         for (idx, group) in groups.iter().enumerate() {
             for item in group {
                 w.write_record([
@@ -172,8 +156,7 @@ pub fn find_duplicates_multi(
                     item.path.to_string_lossy().as_ref(),
                     &item.size.to_string(),
                     item.hash.as_str(),
-                ])
-                .map_err(|e| e.to_string())?;
+                ]).map_err(|e| e.to_string())?;
             }
         }
         w.flush().map_err(|e| e.to_string())

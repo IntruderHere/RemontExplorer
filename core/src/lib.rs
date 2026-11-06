@@ -1,8 +1,8 @@
-//! FileManager core — порт логики `filemanager 6.py` без GUI.
+//! Ядро RemontExplorer — файловые операции без GUI.
 //!
 //! Архитектура: `core` — библиотека логики, `gui` — тонкий egui-слой.
-//! Python-версия — эталон: CSV-отчёты UTF-8 с BOM, разделитель `;`
-//! (Excel RU), колонки 1:1. Парность проверяют `tests/parity_*.rs`.
+//! Отчёты: CSV в UTF-8 с BOM и разделителем `;` (открывается в Excel),
+//! колонки фиксированы контрактом (см. `docs`-комментарии функций).
 
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
@@ -43,7 +43,7 @@ pub use stop::StopToken;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
-    /// CSV (UTF-8 с BOM, разделитель `;`) — как в Python-версии.
+    /// CSV (UTF-8 с BOM, разделитель `;`) — открывается в Excel.
     #[default]
     Csv,
     /// Книга Excel: CSV конвертируется и удаляется.
@@ -152,7 +152,7 @@ fn remember_report(path: &std::path::Path) {
     *last_report_cell().lock().unwrap() = Some(path.to_path_buf());
 }
 
-/// Сток логов/прогресса (аналог print -> ConsoleRedirector в Python-версии).
+/// Сток логов и прогресса операции.
 /// `progress` — необязательный колбэк (current, total); total == 0 означает
 /// неопределённый прогресс (бар-индикатор без доли).
 /// `lang` — язык сообщений, генерируемых в этот сток.

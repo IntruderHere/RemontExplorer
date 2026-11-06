@@ -1,9 +1,9 @@
-//! Parity-тест копирования: атомарное копирование, кэш возобновления,
+//! Тест копирования: атомарное копирование, кэш возобновления,
 //! пропуск при повторном запуске, повтор после изменения источника.
 
 use std::fs;
 
-use filemanager_core::{copy_files_from_list, stdout_sink, StopToken};
+use remont_core::{copy_files_from_list, stdout_sink, StopToken};
 use tempfile::TempDir;
 
 #[test]
@@ -18,7 +18,7 @@ fn copy_and_resume_skip() {
     let cfg = dir.path().join("from_to.csv");
     fs::write(
         &cfg,
-        // trailing-slash: «to» — директория (порт правил Python стр. 328-333)
+        // завершающий слэш: «to» — директория
         format!(
             "{};{}/\n{};{}/\n",
             src_a.display(),
@@ -26,8 +26,7 @@ fn copy_and_resume_skip() {
             src_b.display(),
             dst_dir.display()
         ),
-    )
-    .unwrap();
+    ).unwrap();
     let cache = dir.path().join("copy_resume.json");
     let stop = StopToken::new();
     let log = stdout_sink();

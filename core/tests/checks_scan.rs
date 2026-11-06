@@ -1,11 +1,11 @@
-//! Parity-тест сканирования: формат отчёта обязан совпадать с
-//! Python-версией (UTF-8 BOM, разделитель `;`, те же колонки,
+//! Тест сканирования: формат отчёта обязан совпадать с
+//! контрактом отчёта (UTF-8 BOM, разделитель `;`, те же колонки,
 //! формат размера `%.2f`, семантика index_ops).
 
 use std::fs;
 use std::path::Path;
 
-use filemanager_core::{scan_folder, stdout_sink, StopToken};
+use remont_core::{scan_folder, stdout_sink, StopToken};
 use tempfile::TempDir;
 
 fn setup_tree(root: &Path) {
@@ -38,7 +38,7 @@ fn first_six_digit_run(s: &str) -> String {
 }
 
 #[test]
-fn scan_report_format_matches_python() {
+fn scan_report_format_is_stable() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("My Data");
     setup_tree(&root);
@@ -63,7 +63,7 @@ fn scan_report_format_matches_python() {
     assert_eq!(lines.len(), 4, "шапка + 3 файла");
 
     // Колонка index_ops = первое 6-цифровое вхождение во ВСЁМ full_path
-    // (правило 1:1 с Python regex). Путь tempdir может содержать свои
+    // (ровно 6 цифр подряд). Путь tempdir может содержать свои
     // 6-цифровые последовательности — поэтому ждём референцию от full_path.
     for line in lines.iter().skip(1) {
         let cols: Vec<&str> = line.split(';').collect();

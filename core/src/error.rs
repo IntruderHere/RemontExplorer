@@ -5,7 +5,7 @@ use crate::i18n::{fill, global, tr};
 /// Ошибки операций ядра.
 #[derive(Debug)]
 pub enum CoreError {
-    /// Операция ещё не была портирована из Python-версии.
+    /// Операция недоступна в этой версии.
     #[allow(dead_code)]
     NotPorted(&'static str),
     /// Несуществующий или недопустимый аргумент-путь.

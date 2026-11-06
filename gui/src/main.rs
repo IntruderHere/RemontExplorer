@@ -1,4 +1,4 @@
-//! RemontExplorer GUI (egui/eframe) — порт интерфейса `filemanager 6.py`.
+//! RemontExplorer GUI (egui/eframe): интерфейс и файловые операции.
 //! Целевая ОС — Windows. Сборка на других ОС используется только для
 //! прогона тестов логики и в поставку не входит.
 //! Структура 1:1: вкладки «Работа» / «Настройки»; в «Работе» — ряд кнопок
@@ -24,9 +24,9 @@ use chrono::Timelike;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use egui::{FontId, RichText, ScrollArea, TextEdit};
-use filemanager_core::i18n::Lang;
-use filemanager_core::OutputFormat;
-use filemanager_core::{
+use remont_core::i18n::Lang;
+use remont_core::OutputFormat;
+use remont_core::{
     archive_folders, cleanup_empty_folders, compare_folders, copy_files_from_list, create_folders,
     delete_paths, emit, find_duplicates_multi, read_paths_file, scan_folder, set_global,
     CompareMethod, HashAlgo, LogSink, Sink, StopToken,
@@ -84,10 +84,7 @@ fn default_true() -> bool {
 }
 
 fn load_ui_config() -> UiConfig {
-    fs::read_to_string(config_path("ui.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    fs::read_to_string(config_path("ui.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 fn save_ui_config(cfg: &UiConfig) {
@@ -97,7 +94,7 @@ fn save_ui_config(cfg: &UiConfig) {
     }
 }
 
-/// Режимы — порядок, файлы и описания как в Python (MODES_CONFIG).
+/// Режимы: порядок, файлы настройки и подписи.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Delete,
@@ -129,12 +126,12 @@ const MODES: [ModeDef; 7] = [
 /// Перевод по ключу с учётом глобального языка — для кода вне `App`
 /// (потоки операций, свободные функции).
 fn tg(key: &'static str) -> &'static str {
-    i18n::t(filemanager_core::i18n::global(), key)
+    i18n::t(remont_core::i18n::global(), key)
 }
 
 /// Перевод с подстановкой `{}` — вариант `tg` для форматированных строк.
 fn tfg(key: &'static str, args: &[String]) -> String {
-    filemanager_core::i18n::fill(tg(key), args)
+    remont_core::i18n::fill(tg(key), args)
 }
 
 /// Служебный ключ режима (для config/schedule.json).
@@ -213,10 +210,7 @@ fn data_dir() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(APP_DIR)
+    dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR)
 }
 
 /// Каталог конфигурации (`<Документы>\RemontExplorer\config`).
@@ -238,11 +232,7 @@ fn open_url(url: &str) {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(url)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(url).creation_flags(CREATE_NO_WINDOW).spawn();
     }
     #[cfg(not(windows))]
     {
@@ -260,11 +250,7 @@ fn open_result_file(path: &Path) {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // `start` открывает файл ассоциированным приложением (Excel для xlsx).
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(path).creation_flags(CREATE_NO_WINDOW).spawn();
     }
     #[cfg(not(windows))]
     {
@@ -311,9 +297,9 @@ fn theme_preference(mode: ThemeMode) -> egui::ThemePreference {
 fn apply_output_dir(dir: &str) {
     let trimmed = dir.trim();
     if trimmed.is_empty() {
-        filemanager_core::set_output_dir(None);
+        remont_core::set_output_dir(None);
     } else {
-        filemanager_core::set_output_dir(Some(PathBuf::from(trimmed)));
+        remont_core::set_output_dir(Some(PathBuf::from(trimmed)));
     }
 }
 
@@ -353,7 +339,7 @@ enum TopTab {
     Help,
 }
 
-/// Модальные вопросы (порт messagebox/диалогов Python).
+/// Модальные вопросы и диалоги выбора.
 enum Pending {
     Confirm {
         title: String,
@@ -496,14 +482,8 @@ impl Default for App {
 
 /// Потоки сканирования: config/scan_threads.txt (1..=256), иначе число ядер.
 fn load_scan_threads() -> usize {
-    let def = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    fs::read_to_string(config_path("scan_threads.txt"))
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|n| (1..=256).contains(n))
-        .unwrap_or(def)
+    let def = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    fs::read_to_string(config_path("scan_threads.txt")).ok().and_then(|s| s.trim().parse::<usize>().ok()).filter(|n| (1..=256).contains(n)).unwrap_or(def)
 }
 
 impl App {
@@ -629,14 +609,7 @@ impl App {
             // вертикальное центрирование (vertical_centered и т.п.): они
             // запрашивают всю доступную высоту и раздувают окно на весь экран.
             // Для центрирования по горизонтали — только centered_row().
-            egui::Window::new(egui::RichText::new(""))
-                .id(egui::Id::new("fm_modal"))
-                .title_bar(false)
-                .resizable(false)
-                .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
-                .min_size(egui::vec2(420.0, 0.0))
-                .show(ctx, |ui| {
+            egui::Window::new(egui::RichText::new("")).id(egui::Id::new("fm_modal")).title_bar(false).resizable(false).collapsible(false).anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0)).min_size(egui::vec2(420.0, 0.0)).show(ctx, |ui| {
                     ui.set_min_width(400.0);
                     ui.set_max_width(460.0);
                     ui.add_space(12.0);
@@ -713,8 +686,7 @@ impl App {
                                     RichText::new(self.tf(
                                         "about.version",
                                         &[env!("CARGO_PKG_VERSION").to_string()],
-                                    ))
-                                    .weak(),
+                                    )).weak(),
                                 );
                             });
                             ui.add_space(12.0);
@@ -727,9 +699,7 @@ impl App {
                             if let Some(info) = &self.update_info {
                                 let text = self.tf("upd.available", std::slice::from_ref(&info.version));
                                 ui.label(
-                                    RichText::new(text)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(200, 120, 0)),
+                                    RichText::new(text).strong().color(egui::Color32::from_rgb(200, 120, 0)),
                                 );
                                 ui.add_space(6.0);
                                 if ui.button(self.t("upd.download")).clicked() {
@@ -739,9 +709,7 @@ impl App {
                                 ui.label(RichText::new(self.t("upd.checking")).weak());
                             } else if let Some(err) = &self.update_error {
                                 ui.label(
-                                    RichText::new(self.tf("upd.error", std::slice::from_ref(err)))
-                                        .weak()
-                                        .color(egui::Color32::from_rgb(180, 60, 60)),
+                                    RichText::new(self.tf("upd.error", std::slice::from_ref(err))).weak().color(egui::Color32::from_rgb(180, 60, 60)),
                                 );
                             } else if self.update_done {
                                 ui.label(RichText::new(self.t("upd.latest")).weak());
@@ -803,7 +771,7 @@ impl App {
 
     /// Перевод с подстановкой значений вместо `{}`.
     fn tf(&self, key: &'static str, args: &[String]) -> String {
-        filemanager_core::i18n::fill(self.t(key), args)
+        remont_core::i18n::fill(self.t(key), args)
     }
 
     /// Запуск операции в отдельном потоке (журнал и прогресс — через каналы).
@@ -825,8 +793,7 @@ impl App {
                 move |c: usize, t: usize| {
                     let _ = txp.send((c, t));
                 },
-            )
-            .with_lang(lang),
+            ).with_lang(lang),
         ));
         // Глобальный язык для Display-ошибок core.
         set_global(lang);
@@ -838,16 +805,12 @@ impl App {
         self.prog_rx = Some(rxp);
         self.progress = None;
         self.running = true;
-        filemanager_core::clear_last_report();
+        remont_core::clear_last_report();
         let h = thread::spawn(move || {
             let log2 = log.clone();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(log, stop)));
             if let Err(e) = r {
-                let msg = e
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "unknown reason".into());
+                let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "unknown reason".into());
                 emit(&log2, tfg("log.internal_error", &[msg]));
             }
         });
@@ -886,7 +849,7 @@ impl App {
                 self.progress = None;
                 // Настройка «открывать полученный файл после выполнения».
                 if self.ui_config.open_result {
-                    if let Some(path) = filemanager_core::last_report() {
+                    if let Some(path) = remont_core::last_report() {
                         open_result_file(&path);
                     }
                 }
@@ -912,16 +875,12 @@ impl App {
             ui.separator();
             // «Старт» активна, когда выбран режим и операция не выполняется.
             let start_enabled = !self.running && self.mode.is_some();
-            if ui
-                .add_enabled(
+            if ui.add_enabled(
                     start_enabled,
                     egui::Button::new(
                         RichText::new(self.t("btn.start")).strong().color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(40, 167, 69))
-                    .rounding(egui::Rounding::same(4.0)),
-                )
-                .clicked()
+                    ).fill(egui::Color32::from_rgb(40, 167, 69)).rounding(egui::Rounding::same(4.0)),
+                ).clicked()
             {
                 self.start_action();
             }
@@ -930,9 +889,7 @@ impl App {
             let stop_btn = if stop_enabled {
                 egui::Button::new(
                     RichText::new(self.t("btn.stop")).strong().color(egui::Color32::WHITE),
-                )
-                .fill(egui::Color32::from_rgb(225, 20, 20))
-                .rounding(egui::Rounding::same(4.0))
+                ).fill(egui::Color32::from_rgb(225, 20, 20)).rounding(egui::Rounding::same(4.0))
             } else {
                 egui::Button::new(self.t("btn.stop"))
             };
@@ -968,20 +925,15 @@ impl App {
             ui.set_height(ui.available_height().max(100.0));
             if let Some(w) = &self.startup_warning {
                 ui.add(
-                    egui::Label::new(RichText::new(w.as_str()).color(egui::Color32::from_rgb(200, 60, 0)))
-                        .wrap(),
+                    egui::Label::new(RichText::new(w.as_str()).color(egui::Color32::from_rgb(200, 60, 0))).wrap(),
                 );
                 ui.add_space(4.0);
             }
             ui.label(RichText::new(self.t("lbl.console")));
-            ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
+            ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                     if self.logs.is_empty() {
                         ui.label(
-                            RichText::new(self.t("lbl.console_empty"))
-                                .weak(),
+                            RichText::new(self.t("lbl.console_empty")).weak(),
                         );
                     }
                     for line in &self.logs {
@@ -1008,7 +960,7 @@ impl App {
         None
     }
 
-    /// Порт `start_action` из Python-GUI.
+    /// Запуск операции по кнопке «Старт».
     fn start_action(&mut self) {
         let Some(mode) = self.mode else {
             return;
@@ -1048,9 +1000,7 @@ impl App {
                     } else {
                         self.push_log(&self.tf("lbl.config_missing", &[config_path(def.config).display().to_string()]));
                     }
-                    match rfd::FileDialog::new()
-                        .set_title(self.t("dlg.pick_scan"))
-                        .pick_folder()
+                    match rfd::FileDialog::new().set_title(self.t("dlg.pick_scan")).pick_folder()
                     {
                         Some(p) => {
                             let p2 = p;
@@ -1079,9 +1029,7 @@ impl App {
                             scan_folder(p, Some(Path::new(&master)), threads, &stop, &log);
                         }
                         // Пакетный файл конвертируется один раз — после всех папок.
-                        let master = filemanager_core::finalize_report(PathBuf::from(&master))
-                            .display()
-                            .to_string();
+                        let master = remont_core::finalize_report(PathBuf::from(&master)).display().to_string();
                         if stop.is_set() {
                             emit(&log, tfg("log.scan_batch_stop", std::slice::from_ref(&master)));
                         } else {
@@ -1103,9 +1051,7 @@ impl App {
                     } else {
                         self.push_log(&self.tf("lbl.config_missing", &[config_path(def.config).display().to_string()]));
                     }
-                    match rfd::FileDialog::new()
-                        .set_title(self.t("dlg.pick_cleanup"))
-                        .pick_folder()
+                    match rfd::FileDialog::new().set_title(self.t("dlg.pick_cleanup")).pick_folder()
                     {
                         Some(p) => {
                             self.spawn_op(move |log, stop| {
@@ -1136,8 +1082,7 @@ impl App {
                 }
                 self.pending = Some(Pending::Confirm {
                     title: self.t("dlg.resume_title").into(),
-                    prompt: self.t("dlg.resume_prompt")
-                        .into(),
+                    prompt: self.t("dlg.resume_prompt").into(),
                     kind: ConfirmKind::CopyResume,
                 });
             }
@@ -1151,9 +1096,7 @@ impl App {
                     } else {
                         self.push_log(&self.tf("lbl.config_missing", &[config_path(def.config).display().to_string()]));
                     }
-                    match rfd::FileDialog::new()
-                        .set_title(self.t("dlg.pick_dup"))
-                        .pick_folder()
+                    match rfd::FileDialog::new().set_title(self.t("dlg.pick_dup")).pick_folder()
                     {
                         Some(p) => self.pending = Some(Pending::DupAlgo { paths: vec![p] }),
                         None => self.push_log(self.t("lbl.op_cancelled")),
@@ -1307,9 +1250,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(&l_output);
                 let r = ui.add(
-                    egui::TextEdit::singleline(&mut self.ui_config.output_dir)
-                        .desired_width(ui.available_width() - 180.0)
-                        .hint_text(&l_output_hint),
+                    egui::TextEdit::singleline(&mut self.ui_config.output_dir).desired_width(ui.available_width() - 180.0).hint_text(&l_output_hint),
                 );
                 let _ = r;
                 if ui.button(&l_pick).clicked() {
@@ -1325,9 +1266,7 @@ impl App {
 
             if is_win {
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
-                if ui
-                    .add(egui::Checkbox::new(&mut menu_on, &l_menu))
-                    .changed()
+                if ui.add(egui::Checkbox::new(&mut menu_on, &l_menu)).changed()
                 {
                     let exe = winshell::exe_path();
                     let caption = winshell::menu_caption(self.ui_config.lang == Lang::Ru);
@@ -1352,9 +1291,7 @@ impl App {
                     }
                 }
                 let mut auto_on = self.autostart.unwrap_or(false);
-                if ui
-                    .add(egui::Checkbox::new(&mut auto_on, &l_auto))
-                    .changed()
+                if ui.add(egui::Checkbox::new(&mut auto_on, &l_auto)).changed()
                 {
                     let exe = winshell::exe_path();
                     let minimized = self.ui_config.close_to_tray;
@@ -1404,7 +1341,7 @@ impl App {
         if self.ui_config != ui_before {
             save_ui_config(&self.ui_config);
             set_global(self.ui_config.lang);
-            filemanager_core::set_output_format(self.ui_config.report_format);
+            remont_core::set_output_format(self.ui_config.report_format);
             apply_output_dir(&self.ui_config.output_dir);
             // Пункт меню Проводника подписан текущим языком — обновляем,
             // если он установлен.
@@ -1423,7 +1360,7 @@ impl App {
             ui.ctx().request_repaint();
         }
 
-        // Перезагрузка редактора при смене режима (как создание виджетов в Python)
+        // Перезагрузка редактора при смене режима
         if self.settings_loaded != self.settings_sel {
             self.settings_loaded = self.settings_sel;
             let def = &MODES[self.settings_sel];
@@ -1478,8 +1415,7 @@ impl App {
         }
         ui.label(RichText::new(
             self.t("lbl.paths_hint"),
-        )
-        .weak());
+        ).weak());
         ui.horizontal(|ui| {
             if ui.button(self.t("btn.load")).clicked() {
                 // Выбор файла на диске (раньше кнопка просто перечитывала
@@ -1487,7 +1423,7 @@ impl App {
                 if let Some(p) = rfd::FileDialog::new().pick_file() {
                     match fs::read(&p) {
                         Ok(bytes) => {
-                            self.editor_single = filemanager_core::config::decode_config(&bytes);
+                            self.editor_single = remont_core::config::decode_config(&bytes);
                         }
                         Err(e) => {
                             self.push_log(&tfg("lbl.load_failed", &[e.to_string()]));
@@ -1547,8 +1483,7 @@ impl App {
         });
         ui.label(RichText::new(
             self.t("lbl.pairs_hint"),
-        )
-        .weak());
+        ).weak());
         ui.horizontal(|ui| {
             if ui.button(self.t("btn.load")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_file() {
@@ -1623,16 +1558,12 @@ impl App {
         });
     }
 
-    /// Сохранение парного конфига (порт `settings_save_pair`): выравнивание,
+    /// Сохранение парного конфига: выравнивание,
     /// проверка неполных пар (с подтверждением), запись CSV `a;b`.
     fn save_pair_config(&mut self, force: bool) {
         let def = &MODES[self.settings_sel];
         let mut lines1: Vec<String> = self.editor_left.lines().map(|l| l.trim().to_string()).collect();
-        let mut lines2: Vec<String> = self
-            .editor_right
-            .lines()
-            .map(|l| l.trim().to_string())
-            .collect();
+        let mut lines2: Vec<String> = self.editor_right.lines().map(|l| l.trim().to_string()).collect();
         let max_len = lines1.len().max(lines2.len());
         while lines1.len() < max_len {
             lines1.push(String::new());
@@ -1640,20 +1571,9 @@ impl App {
         while lines2.len() < max_len {
             lines2.push(String::new());
         }
-        let mismatched: Vec<usize> = lines1
-            .iter()
-            .zip(lines2.iter())
-            .enumerate()
-            .filter(|(_, (a, b))| (a.is_empty() && !b.is_empty()) || (!a.is_empty() && b.is_empty()))
-            .map(|(i, _)| i + 1)
-            .collect();
+        let mismatched: Vec<usize> = lines1.iter().zip(lines2.iter()).enumerate().filter(|(_, (a, b))| (a.is_empty() && !b.is_empty()) || (!a.is_empty() && b.is_empty())).map(|(i, _)| i + 1).collect();
         if !mismatched.is_empty() && !force {
-            let sample = mismatched
-                .iter()
-                .take(5)
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let sample = mismatched.iter().take(5).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
             let more = if mismatched.len() > 5 {
                 tfg("lbl.more", &[(mismatched.len() - 5).to_string()])
             } else {
@@ -1733,9 +1653,7 @@ impl App {
                         add_task = true;
                     }
                     let can_del = !self.sched.tasks.is_empty();
-                    if ui
-                        .add_enabled(can_del, egui::Button::new(self.t("sch.remove")))
-                        .clicked()
+                    if ui.add_enabled(can_del, egui::Button::new(self.t("sch.remove"))).clicked()
                     {
                         del_task = true;
                     }
@@ -1746,22 +1664,15 @@ impl App {
                 } else {
                     // Подписи собираются заранее: во время выбора нельзя
                     // держать заимствование `self` (см. self.t внутри цикла).
-                    let labels: Vec<String> = self
-                        .sched
-                        .tasks
-                        .iter()
-                        .map(|t| {
-                            let mode_label = mode_from_key(&t.mode)
-                                .map(|m| self.t(mode_key(m)))
-                                .unwrap_or("?");
+                    let labels: Vec<String> = self.sched.tasks.iter().map(|t| {
+                            let mode_label = mode_from_key(&t.mode).map(|m| self.t(mode_key(m))).unwrap_or("?");
                             let state = if t.enabled && t.remaining > 0 {
                                 format!("  ({}, {})", t.time_label(), t.remaining)
                             } else {
                                 format!("  ({}, —)", t.time_label())
                             };
                             format!("{mode_label}{state}")
-                        })
-                        .collect();
+                        }).collect();
                     for (i, label) in labels.into_iter().enumerate() {
                         ui.selectable_value(&mut self.sched_sel, i, label);
                     }
@@ -1780,8 +1691,7 @@ impl App {
                             "lbl.schedule_file",
                             &[config_path("schedule.json").display().to_string()],
                         ),
-                    )
-                    .weak(),
+                    ).weak(),
                 );
             });
             ui.separator();
@@ -1794,10 +1704,7 @@ impl App {
 
         if add_task {
             let id = self.sched.next_id();
-            let mode = self
-                .mode
-                .map(mode_slug)
-                .unwrap_or("scan");
+            let mode = self.mode.map(mode_slug).unwrap_or("scan");
             self.sched.tasks.push(schedule::Task::new(id, mode, 9, 0, 1));
             self.sched_sel = self.sched.tasks.len() - 1;
             self.sched.save();
@@ -1833,13 +1740,8 @@ impl App {
         let l_enabled = self.t("sch.enabled").to_string();
         let l_tab = self.t("tab.schedule").to_string();
         let cur_mode = self.sched.tasks[idx].mode.clone();
-        let cur_label = mode_from_key(&cur_mode)
-            .map(|m| self.t(mode_key(m)).to_string())
-            .unwrap_or_else(|| cur_mode.clone());
-        let mode_items: Vec<(&'static str, String)> = MODES
-            .iter()
-            .map(|d| (mode_slug(d.mode), self.t(d.title_key).to_string()))
-            .collect();
+        let cur_label = mode_from_key(&cur_mode).map(|m| self.t(mode_key(m)).to_string()).unwrap_or_else(|| cur_mode.clone());
+        let mode_items: Vec<(&'static str, String)> = MODES.iter().map(|d| (mode_slug(d.mode), self.t(d.title_key).to_string())).collect();
 
         let mut run_now = false;
         let mut browse = false;
@@ -1852,9 +1754,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(&l_mode);
-                egui::ComboBox::from_id_salt("sch_mode")
-                    .selected_text(cur_label.clone())
-                    .show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("sch_mode").selected_text(cur_label.clone()).show_ui(ui, |ui| {
                         for (slug, title) in &mode_items {
                             let selected = task.mode == *slug;
                             if ui.selectable_label(selected, title).clicked() && !selected {
@@ -1879,8 +1779,7 @@ impl App {
                     RichText::new(format!(
                         "{:02}:{:02}",
                         task.hour, task.minute
-                    ))
-                    .weak(),
+                    )).weak(),
                 );
             });
             ui.horizontal(|ui| {
@@ -1897,8 +1796,7 @@ impl App {
             ui.label(&l_output);
             ui.horizontal(|ui| {
                 let r = ui.add(
-                    egui::TextEdit::singleline(&mut task.output_dir)
-                        .desired_width(ui.available_width() - 120.0),
+                    egui::TextEdit::singleline(&mut task.output_dir).desired_width(ui.available_width() - 120.0),
                 );
                 if r.changed() {
                     dirty = true;
@@ -1935,9 +1833,7 @@ impl App {
         }
         if run_now {
             if self.running {
-                let name = mode_from_key(&self.sched.tasks[idx].mode)
-                    .map(|m| self.t(mode_key(m)).to_string())
-                    .unwrap_or_default();
+                let name = mode_from_key(&self.sched.tasks[idx].mode).map(|m| self.t(mode_key(m)).to_string()).unwrap_or_default();
                 self.push_log(&self.tf("log.sch_busy", &[name]));
             } else {
                 self.run_task_now(idx);
@@ -1964,15 +1860,10 @@ impl App {
             if self.running {
                 // Идёт другая операция — повторим на следующем тике;
                 // уведомление — не чаще одного раза в минуту.
-                let notify = self
-                    .sched_busy_last
-                    .map(|ts| now.duration_since(ts) >= std::time::Duration::from_secs(60))
-                    .unwrap_or(true);
+                let notify = self.sched_busy_last.map(|ts| now.duration_since(ts) >= std::time::Duration::from_secs(60)).unwrap_or(true);
                 if notify {
                     self.sched_busy_last = Some(now);
-                    let name = mode_from_key(&self.sched.tasks[i].mode)
-                        .map(|m| self.t(mode_key(m)).to_string())
-                        .unwrap_or_default();
+                    let name = mode_from_key(&self.sched.tasks[i].mode).map(|m| self.t(mode_key(m)).to_string()).unwrap_or_default();
                     self.push_log(&tfg("log.sch_busy", &[name]));
                 }
             } else {
@@ -1980,9 +1871,7 @@ impl App {
             }
         } else if let Some(i) = exhausted_index(&self.sched.tasks) {
             // Задание исчерпало выполнения — отключаем и сообщаем один раз.
-            let name = mode_from_key(&self.sched.tasks[i].mode)
-                .map(|m| self.t(mode_key(m)).to_string())
-                .unwrap_or_default();
+            let name = mode_from_key(&self.sched.tasks[i].mode).map(|m| self.t(mode_key(m)).to_string()).unwrap_or_default();
             self.sched.tasks[i].enabled = false;
             self.sched.save();
             self.push_log(&self.tf("log.sch_exhausted", &[name]));
@@ -1992,23 +1881,10 @@ impl App {
         // было закрыто или занято) — сообщаем о каждом один раз.
         // Списки считаются ДО обращения к self.t: внутри цикла нельзя
         // держать заимствование `self` (см. skill: borrow-конфликт egui).
-        let notified: std::collections::HashSet<u64> = self
-            .sched_missed_notified
-            .iter()
-            .filter(|(_, d)| *d == today)
-            .map(|(id, _)| *id)
-            .collect();
-        let missed: Vec<(u64, String)> = self
-            .sched
-            .tasks
-            .iter()
-            .filter(|t| task_missed(t, &today, cur) && !notified.contains(&t.id))
-            .map(|t| (t.id, t.mode.clone()))
-            .collect();
+        let notified: std::collections::HashSet<u64> = self.sched_missed_notified.iter().filter(|(_, d)| *d == today).map(|(id, _)| *id).collect();
+        let missed: Vec<(u64, String)> = self.sched.tasks.iter().filter(|t| task_missed(t, &today, cur) && !notified.contains(&t.id)).map(|t| (t.id, t.mode.clone())).collect();
         for (id, mode) in missed {
-            let name = mode_from_key(&mode)
-                .map(|m| self.t(mode_key(m)).to_string())
-                .unwrap_or_default();
+            let name = mode_from_key(&mode).map(|m| self.t(mode_key(m)).to_string()).unwrap_or_default();
             self.push_log(&tfg("log.sch_missed", &[name]));
             self.sched_missed_notified.push((id, today.clone()));
         }
@@ -2089,9 +1965,7 @@ impl App {
                         }
                         scan_folder(p, Some(&master), threads, &stop, &log);
                     }
-                    let master_s = filemanager_core::finalize_report(PathBuf::from(&master_s))
-                        .display()
-                        .to_string();
+                    let master_s = remont_core::finalize_report(PathBuf::from(&master_s)).display().to_string();
                     if stop.is_set() {
                         emit(&log, tfg("log.scan_batch_stop", std::slice::from_ref(&master_s)));
                     } else {
@@ -2197,8 +2071,7 @@ impl App {
                 ui.label(RichText::new(self.t("help.result")).strong());
                 ui.group(|ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(h.result_example).monospace())
-                            .wrap(),
+                        egui::Label::new(RichText::new(h.result_example).monospace()).wrap(),
                     );
                 });
             });
@@ -2206,12 +2079,9 @@ impl App {
     }
 }
 
-/// Загрузка текста конфига (utf-8 с BOM -> cp1251, как в Python).
+/// Загрузка текста конфига (UTF-8 с BOM, затем cp1251).
 fn load_text_file(path: impl AsRef<Path>) -> String {
-    fs::read(path)
-        .ok()
-        .map(|b| filemanager_core::config::decode_config(&b))
-        .unwrap_or_default()
+    fs::read(path).ok().map(|b| remont_core::config::decode_config(&b)).unwrap_or_default()
 }
 
 fn save_text_file(path: impl AsRef<Path>, content: &str) -> Result<(), String> {
@@ -2222,13 +2092,13 @@ fn save_text_file(path: impl AsRef<Path>, content: &str) -> Result<(), String> {
     fs::write(p, content.trim()).map_err(|e| e.to_string())
 }
 
-/// Разбор парного конфига в две колонки (порт `settings_load_pair`).
+/// Разбор парного конфига в две колонки.
 fn load_pair_file(path: impl AsRef<Path>) -> (String, String) {
     let bytes = match fs::read(path.as_ref()) {
         Ok(b) => b,
         Err(_) => return (String::new(), String::new()),
     };
-    let text = filemanager_core::config::decode_config(&bytes);
+    let text = remont_core::config::decode_config(&bytes);
     let mut left = Vec::new();
     let mut right = Vec::new();
     for line in text.lines() {
@@ -2358,9 +2228,7 @@ impl eframe::App for App {
                     if let Some(info) = &self.update_info {
                         let label = self.tf("upd.banner", std::slice::from_ref(&info.version));
                         let url = info.url.clone();
-                        if ui
-                            .button(RichText::new(label).color(egui::Color32::from_rgb(200, 120, 0)))
-                            .clicked()
+                        if ui.button(RichText::new(label).color(egui::Color32::from_rgb(200, 120, 0))).clicked()
                         {
                             open_url(&url);
                         }
@@ -2453,7 +2321,7 @@ fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, boo
 
 fn main() -> eframe::Result<()> {
     let (startup_scan, start_hidden) = parse_args();
-    // Как в Python main(): относительные пути (config/, отчёты) — рядом с приложением.
+    // Рабочий каталог — папка приложения (отчёты по умолчанию пишутся рядом).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let _ = std::env::set_current_dir(dir);
@@ -2473,11 +2341,7 @@ fn main() -> eframe::Result<()> {
     migrate_legacy_config(&cfg_dir);
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1050.0, 800.0])
-            .with_min_inner_size([800.0, 600.0])
-            .with_icon(app_icon()),
-        ..Default::default()
+        viewport: egui::ViewportBuilder::default().with_inner_size([1050.0, 800.0]).with_min_inner_size([800.0, 600.0]).with_icon(app_icon()),..Default::default()
     };
     eframe::run_native(
         "RemontExplorer",
@@ -2488,20 +2352,16 @@ fn main() -> eframe::Result<()> {
             _cc.egui_ctx.set_theme(theme_preference(cfg.theme));
             // Глобальный язык для core (Display-ошибки) и формат отчётов.
             set_global(cfg.lang);
-            filemanager_core::set_output_format(cfg.report_format);
+            remont_core::set_output_format(cfg.report_format);
             apply_output_dir(&cfg.output_dir);
             let mut app = App {
                 startup_scan: startup_scan.clone(),
-                start_hidden,
-                ..Default::default()
+                start_hidden,..Default::default()
             };
             // Проверка: папка приложения доступна для записи (конфиги, отчёты,
             // архивы пишутся рядом с exe). Если нет — предупреждение в консоли.
-            let probe = Path::new("config")
-                .join("__write_probe__");
-            let probe_ok = fs::write(&probe, b"ok")
-                .and_then(|_| fs::remove_file(&probe))
-                .is_ok();
+            let probe = Path::new("config").join("__write_probe__");
+            let probe_ok = fs::write(&probe, b"ok").and_then(|_| fs::remove_file(&probe)).is_ok();
             if !probe_ok {
                 app.startup_warning =
                     Some(i18n::t(cfg.lang, "warn.write_failed").to_string());
@@ -2706,8 +2566,7 @@ mod tests {
             let _ = fs::create_dir_all(p.join("config"));
             std::env::set_var("REMONTEXPLORER_DATA_DIR", &p);
             p
-        })
-        .clone()
+        }).clone()
     }
 
     /// Тесты, меняющие рабочий каталог, выполняются строго по одному:
@@ -2778,8 +2637,7 @@ mod tests {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(800.0, 600.0),
-                )),
-                ..Default::default()
+                )),..Default::default()
             };
             let mut seen = None;
             let _ = ctx.run(input, |ctx| {
@@ -2809,8 +2667,7 @@ mod tests {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
                             egui::vec2(1000.0, 720.0),
-                        )),
-                        ..Default::default()
+                        )),..Default::default()
                     };
                     let _ = ctx.run(input, |ctx| {
                         egui::CentralPanel::default().show(ctx, |ui| match tab {
@@ -2867,12 +2724,7 @@ mod tests {
             "не проставлена отметка последнего запуска"
         );
 
-        let reports: Vec<_> = fs::read_dir(&out)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with("BATCH_SCAN_"))
-            .collect();
+        let reports: Vec<_> = fs::read_dir(&out).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with("BATCH_SCAN_")).collect();
         assert_eq!(reports.len(), 1, "ожидался один отчёт в папке результата, есть: {reports:?}");
         let body = fs::read_to_string(out.join(&reports[0])).unwrap();
         assert!(body.contains("a.txt") && body.contains("b.txt"), "в отчёте нет файлов: {body}");
@@ -2975,8 +2827,7 @@ mod tests {
         ];
         for (name, pending) in cases {
             let mut app = App {
-                pending: Some(pending),
-                ..Default::default()
+                pending: Some(pending),..Default::default()
             };
             let ctx = egui::Context::default();
             for _ in 0..3 {
@@ -2984,16 +2835,13 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
                         egui::vec2(1200.0, 800.0),
-                    )),
-                    ..Default::default()
+                    )),..Default::default()
                 };
                 let _ = ctx.run(input, |ctx| {
                     assert!(app.pending_modal(ctx), "диалог {name} не показан");
                 });
             }
-            let rect = ctx
-                .memory(|m| m.area_rect(egui::Id::new("fm_modal")))
-                .unwrap_or_else(|| panic!("окно диалога {name} не найдено"));
+            let rect = ctx.memory(|m| m.area_rect(egui::Id::new("fm_modal"))).unwrap_or_else(|| panic!("окно диалога {name} не найдено"));
             println!(
                 "диалог {name}: {:.0} x {:.0}",
                 rect.width(),
@@ -3035,9 +2883,7 @@ mod tests {
         );
         // Обе кнопки присутствуют в панели одновременно (не взаимоисключающие).
         let rest = &src[src.find("fn work_tab").expect("work_tab не найден")..];
-        let work = &rest[..rest
-            .find("if let Some(m) = self.mode")
-            .expect("конец панели кнопок не найден")];
+        let work = &rest[..rest.find("if let Some(m) = self.mode").expect("конец панели кнопок не найден")];
         assert!(work.contains("btn.start"), "в панели нет кнопки «Старт»");
         assert!(work.contains("btn.stop"), "в панели нет кнопки «Остановить»");
     }
@@ -3057,10 +2903,9 @@ mod tests {
             code.contains("\"RemontExplorer\","),
             "заголовок окна не переименован"
         );
-        assert!(
-            !code.contains("Ivan Evseev's FileManager"),
-            "осталось старое название"
-        );
+        // старое название собирается из частей, чтобы не встречаться в коде
+        let old_name = ["Ivan Evseev", "'s File", "Manager"].concat();
+        assert!(!code.contains(&old_name), "осталось старое название");
         // Версия убрана из правого верхнего угла (осталась в «О приложении»).
         assert!(!code.contains("app.version"), "версия снова в шапке интерфейса");
         assert!(code.contains("about.version"), "версия пропала из «О приложении»");
@@ -3143,14 +2988,8 @@ mod tests {
     }
 
     fn find_report(dir: &std::path::Path, prefix: &str) -> Option<std::path::PathBuf> {
-        fs::read_dir(dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with(prefix))
-                    .unwrap_or(false)
+        fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                p.file_name().map(|n| n.to_string_lossy().starts_with(prefix)).unwrap_or(false)
             })
     }
 
@@ -3217,8 +3056,7 @@ mod tests {
         fs::write(
             config_path("folders_to_compare.txt"),
             format!("{};{}", a_dir.display(), b_dir.display()),
-        )
-        .unwrap();
+        ).unwrap();
         let app = run("compare");
         assert_eq!(app.sched.tasks[0].remaining, 0, "сравнение: выполнение не списано");
         let cmp_report = find_report(&out, "compare_").expect("сравнение: отчёт не создан");
@@ -3245,8 +3083,7 @@ mod tests {
         fs::write(
             config_path("from_to.csv"),
             format!("{};{}", copy_src.display(), copy_dst.display()),
-        )
-        .unwrap();
+        ).unwrap();
         let app = run("copy");
         assert_eq!(app.sched.tasks[0].remaining, 0, "копирование: выполнение не списано");
         assert_eq!(
@@ -3266,8 +3103,7 @@ mod tests {
         fs::write(
             config_path("folders_to_duplicates.txt"),
             format!("{}\n{}", dup_a.display(), dup_b.display()),
-        )
-        .unwrap();
+        ).unwrap();
         let app = run("duplicates");
         assert_eq!(app.sched.tasks[0].remaining, 0, "дубликаты: выполнение не списано");
         let dup_report = find_report(&out, "duplicates_").expect("дубликаты: отчёт не создан");
@@ -3429,8 +3265,7 @@ mod tests {
         let _lock = cwd_lock();
         let _d = test_data_dir();
         let cfg = UiConfig {
-            close_to_tray: true,
-            ..Default::default()
+            close_to_tray: true,..Default::default()
         };
         save_ui_config(&cfg);
         let file = config_path("ui.json");
@@ -3487,9 +3322,7 @@ mod tests {
         assert!(tray_src.contains("ShowWindow"), "окно не показывается средствами Win32");
         assert!(tray_src.contains("show_window"), "нет функции показа окна");
         // Закрытие приложения — гарантированное завершение процесса.
-        let close_pos = tray_src
-            .find("std::process::exit(0)")
-            .expect("пункт «Закрыть приложение» не завершает процесс");
+        let close_pos = tray_src.find("std::process::exit(0)").expect("пункт «Закрыть приложение» не завершает процесс");
         let open_pos = tray_src.find("reveal(&hwnd, &ctx)").expect("нет показа окна из меню");
         assert!(open_pos < close_pos, "порядок обработки пунктов меню нарушен");
 
@@ -3588,7 +3421,7 @@ mod tests {
         );
         assert!(code.contains("apply_output_dir"), "папка не применяется");
         assert!(
-            code.contains("filemanager_core::last_report()"),
+            code.contains("remont_core::last_report()"),
             "результат не открывается после операции"
         );
     }

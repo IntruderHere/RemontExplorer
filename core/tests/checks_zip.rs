@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use filemanager_core::{archive_folders, stdout_sink, StopToken};
+use remont_core::{archive_folders, stdout_sink, StopToken};
 use tempfile::TempDir;
 
 // Оба теста пишут `created_folders_<ts>.zip` в CWD (ts — секунды): без
@@ -35,7 +35,7 @@ fn archive_folders_zips_structure() {
     assert!(zip_path.exists());
     assert!(zip_path.to_string_lossy().starts_with("created_folders_"));
 
-    // содержимое: имена относительны ОБЩЕЙ БАЗЫ (как Python relative_to(common_base)):
+    // содержимое: имена относительны ОБЩЕЙ БАЗЫ:
     // A/, A/a1.txt, B/, B/sub/, B/sub/b2.txt
     let mut names = Vec::new();
     {

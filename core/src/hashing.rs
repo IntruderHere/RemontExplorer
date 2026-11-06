@@ -6,7 +6,7 @@ use std::path::Path;
 
 use md5::Digest as _; // общий digest::Digest для sha2 и md5 (оба re-export одного trait)
 
-/// Алгоритм хеша (порт диалога выбора в Python-версии).
+/// Алгоритм хеширования (выбирается в диалоге).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgo {
     Sha256,
@@ -52,7 +52,7 @@ pub fn hash_file(path: &Path, algo: HashAlgo) -> Option<String> {
     }
 }
 
-/// Побайтовое сравнение двух файлов (порт `compare_binary_worker`):
+/// Побайтовое сравнение двух файлов:
 /// сначала размер, затем блоки по 8192 байта. Ошибка чтения = «различаются».
 pub fn files_differ_binary(a: &Path, b: &Path) -> bool {
     let (ma, mb) = match (std::fs::metadata(a), std::fs::metadata(b)) {
