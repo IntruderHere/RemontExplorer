@@ -1,0 +1,28 @@
+[package]
+name = "filemanager-core"
+description = "Ядро FileManager: файловые операции без GUI (порт filemanager 6.py)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "filemanager_core"
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+csv.workspace = true
+encoding_rs.workspace = true
+filetime.workspace = true
+md-5.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+rust_xlsxwriter.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip.workspace = true

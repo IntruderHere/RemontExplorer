@@ -1,0 +1,329 @@
+//! Копирование файлов по списку (порт `copy_files_from_list` + `_robust_copy`).
+//!
+//! Возможности (парность с Python-версией):
+//! - возобновление по кэшу `copy_resume.json` (size + mtime источника);
+//! - атомарное копирование: `.имя.tmp_*` + rename;
+//! - длинные пути Windows через префикс `\\?\` (см. [`crate::pathutil`]);
+//! - 3 попытки с задержкой 1.5 с на I/O-ошибки;
+//! - проверка сети: DNS + TCP/SMB порт 445;
+//! - стоп: воркеры выходят между задачами, «висящие» копирования
+//!   завершаются (пул не сливается).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::read_pairs_csv;
+use crate::netcheck::{check_server, CheckResult};
+use crate::pathutil::{modified_secs, normalize_long_path, resolve_loose};
+use crate::stop::StopToken;
+use crate::{emit_progress, LogSink};
+use crate::em;
+
+/// Число потоков по умолчанию (как в Python-версии).
+pub const DEFAULT_WORKERS: usize = 16;
+const RETRIES: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct CacheEntry {
+    size: u64,
+    mtime: f64,
+}
+
+type Cache = std::collections::BTreeMap<String, CacheEntry>;
+
+fn cache_key(src: &Path, dst: &Path) -> String {
+    format!(
+        "{}\u{0}{}",
+        resolve_loose(src).display(),
+        resolve_loose(dst).display()
+    )
+}
+
+fn load_cache(path: &Path) -> Cache {
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_cache(path: &Path, cache: &Cache, log: &LogSink) {
+    let Ok(json) = serde_json::to_string_pretty(cache) else {
+        return;
+    };
+    if let Err(e) = fs::write(path, json) {
+        em!(log, "copy_cache_save_warn", path.display(), e.to_string());
+    }
+}
+
+/// Проверка «уже скопировано» (порт `_is_already_copied`).
+fn is_already_copied(src: &Path, dst: &Path, cache: &Cache) -> bool {
+    let key = cache_key(src, dst);
+    let Some(entry) = cache.get(&key) else {
+        return false;
+    };
+    let Ok(st) = fs::metadata(src) else {
+        return false;
+    };
+    if st.len() != entry.size || (modified_secs(&st) - entry.mtime).abs() > 1.0 {
+        return false;
+    }
+    fs::metadata(dst).is_ok_and(|d| d.len() == entry.size)
+}
+
+/// Атомарное копирование с ретраями (порт `_robust_copy` + `retry_on_error`).
+fn robust_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    let src = normalize_long_path(src);
+    let mut dst = normalize_long_path(dst);
+    if dst.is_dir() {
+        let name = src
+            .file_name()
+            .ok_or_else(|| std::io::Error::other(crate::i18n::tr(crate::i18n::global(), "copy_empty_name")))?;
+        dst = normalize_long_path(&dst.join(name));
+    }
+    let name = dst
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    static COPY_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = COPY_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dst
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{name}.tmp_{}_{}_{ts}",
+            std::process::id(),
+            seq
+        ));
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut last_err = std::io::Error::other(crate::i18n::tr(crate::i18n::global(), "copy_no_attempt"));
+    for attempt in 1..=RETRIES {
+        let res = fs::copy(&src, &tmp).and_then(|_| fs::rename(&tmp, &dst));
+        match res {
+            Ok(()) => {
+                // copy2: сохраняем метаданные (mtime) как в Python
+                if let Ok(s) = fs::metadata(&src) {
+                    let _ = filetime::set_file_mtime(
+                        &dst,
+                        filetime::FileTime::from_system_time(
+                            s.modified().unwrap_or(SystemTime::now()),
+                        ),
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = e;
+                let _ = fs::remove_file(&tmp);
+                if attempt < RETRIES {
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// Копирует файлы из CSV-списка (порт `copy_files_from_list`).
+/// Возвращает число успешно скопированных в этом запуске.
+pub fn copy_files_from_list(
+    config_file: &Path,
+    resume_log: &Path,
+    max_workers: usize,
+    resume: bool,
+    stop: &StopToken,
+    log: &LogSink,
+) -> usize {
+    stop.reset();
+    let cache: Cache = if resume {
+        let cache = load_cache(resume_log);
+        // Кэш существует, но не распарсился — предупреждаем, а не молчим.
+        if cache.is_empty() && resume_log.exists() && fs::read(resume_log).is_ok_and(|b| !b.is_empty())
+        {
+            em!(log, "copy_resume_corrupt");
+        }
+        cache
+    } else {
+        Cache::new()
+    };
+    let pairs = read_pairs_csv(config_file);
+    if pairs.is_empty() {
+        em!(log, "copy_config_missing", config_file.display());
+        return 0;
+    }
+
+    let mut tasks: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut servers = std::collections::BTreeSet::new();
+    let mut skipped = 0usize;
+
+    for pair in &pairs {
+        let from = &pair.from;
+        let to = &pair.to;
+        if !from.exists() {
+            em!(log, "copy_source_missing", from.display());
+            continue;
+        }
+        let to_s = to.to_string_lossy().into_owned();
+        let dst = if to.exists() && to.is_dir() {
+            to.join(from.file_name().unwrap_or_default())
+        } else if to_s.ends_with(['\\', '/']) {
+            PathBuf::from(to_s.trim_end_matches(['\\', '/']))
+                .join(from.file_name().unwrap_or_default())
+        } else {
+            to.clone()
+        };
+        if resume && is_already_copied(from, &dst, &cache) {
+            skipped += 1;
+            continue;
+        }
+        let from_s = from.to_string_lossy().into_owned();
+        if let Some(rest) = from_s.strip_prefix(r"\\") {
+            let server = rest.split(['\\', '/']).next().unwrap_or("").to_string();
+            if !server.is_empty() {
+                servers.insert(server);
+            }
+        }
+        tasks.push((from.clone(), dst));
+    }
+
+    if skipped > 0 {
+        em!(log, "copy_skipped", skipped);
+    }
+    if tasks.is_empty() {
+        em!(log, "copy_no_tasks");
+        return 0;
+    }
+
+    if !servers.is_empty() {
+        em!(log, "copy_netcheck_start");
+        let mut unreachable = Vec::new();
+        for server in &servers {
+            match check_server(server) {
+                CheckResult::Reachable => {
+                    em!(log, "copy_server_ok", server)
+                }
+                CheckResult::DnsFailed => {
+                    em!(log, "copy_server_dns_fail", server);
+                    unreachable.push(server.clone());
+                }
+                CheckResult::Unreachable => {
+                    em!(log, "copy_server_tcp_fail", server);
+                    unreachable.push(server.clone());
+                }
+            }
+        }
+        if !unreachable.is_empty() {
+            em!(log, "copy_net_unavailable", unreachable.join(", "));
+            em!(log, "copy_net_warn_continue");
+        }
+    } else {
+        em!(log, "copy_all_local");
+    }
+
+    let total = tasks.len();
+    em!(log, "copy_start", total, max_workers);
+    emit_progress(log, 0, total);
+
+    let (tx, rx) = mpsc::channel::<(PathBuf, PathBuf)>();
+    for t in tasks {
+        if tx.send(t).is_err() {
+            break;
+        }
+    }
+    drop(tx);
+
+    let rx = Arc::new(Mutex::new(rx));
+    let cache = Arc::new(Mutex::new(cache));
+    let ok_count = Arc::new(AtomicUsize::new(0));
+    let processed = Arc::new(AtomicUsize::new(0));
+    let resume_log_path = resume_log.to_path_buf();
+
+    let mut handles = Vec::new();
+    for _ in 0..max_workers {
+        let stop = stop.clone();
+        let rx = Arc::clone(&rx);
+        let cache = Arc::clone(&cache);
+        let log = log.clone();
+        let ok_count = Arc::clone(&ok_count);
+        let processed = Arc::clone(&processed);
+        let resume_log_path = resume_log_path.clone();
+        handles.push(std::thread::spawn(move || {
+            loop {
+                let item = {
+                    let Ok(guard) = rx.lock() else { break };
+                    match guard.recv_timeout(Duration::from_millis(200)) {
+                        Ok(it) => Some(it),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                };
+                if stop.is_set() {
+                    break;
+                }
+                let Some((src, dst)) = item else { break };
+                let ok = match robust_copy(&src, &dst) {
+                    Ok(()) => {
+                        if resume {
+                            if let Ok(st) = fs::metadata(&src) {
+                                let key = cache_key(&src, &dst);
+                                if let Ok(mut c) = cache.lock() {
+                                    c.insert(
+                                        key,
+                                        CacheEntry {
+                                            size: st.len(),
+                                            mtime: modified_secs(&st),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        em!(&log, "copy_file_error", src.display(), dst.display(), e.to_string());
+                        false
+                    }
+                };
+                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                if ok {
+                    ok_count.fetch_add(1, Ordering::Relaxed);
+                }
+                emit_progress(&log, done, total);
+                if done.is_multiple_of(10) || done == total {
+                    em!(&log, "copy_progress", done, total);
+                }
+                if resume && done.is_multiple_of(50) {
+                    if let Ok(c) = cache.lock() {
+                        save_cache(&resume_log_path, &c, &log);
+                    }
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+
+    if resume {
+        if let Ok(c) = cache.lock() {
+            save_cache(resume_log, &c, log);
+        }
+    }
+    let ok = ok_count.load(Ordering::Relaxed);
+    emit_progress(log, total, total);
+    em!(log, "copy_done", ok, total);
+    ok
+}

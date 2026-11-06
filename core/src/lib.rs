@@ -1,0 +1,230 @@
+//! FileManager core — порт логики `filemanager 6.py` без GUI.
+//!
+//! Архитектура: `core` — библиотека логики, `gui` — тонкий egui-слой.
+//! Python-версия — эталон: CSV-отчёты UTF-8 с BOM, разделитель `;`
+//! (Excel RU), колонки 1:1. Парность проверяют `tests/parity_*.rs`.
+
+#![allow(clippy::cloned_ref_to_slice_refs)]
+
+pub mod cleanup;
+pub mod compare;
+pub mod config;
+pub mod copy;
+pub mod create;
+pub mod delete;
+pub mod duplicates;
+pub mod error;
+pub mod hashing;
+pub mod i18n;
+pub mod netcheck;
+pub mod pathutil;
+pub mod scan;
+pub mod stop;
+pub mod xlsx;
+
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub use cleanup::cleanup_empty_folders;
+pub use compare::{compare_folders, CompareMethod};
+pub use config::{read_pairs_csv, read_paths_file, Pair};
+pub use copy::copy_files_from_list;
+pub use create::{archive_folders, create_folders};
+pub use delete::{delete_paths, DeleteStats};
+pub use duplicates::find_duplicates_multi;
+pub use error::CoreError;
+pub use hashing::HashAlgo;
+pub use i18n::{global, set_global, tr, Lang};
+pub use scan::{scan_folder, ScanStats};
+pub use xlsx::csv_to_xlsx;
+pub use stop::StopToken;
+
+
+/// Формат файлов отчёта.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// CSV (UTF-8 с BOM, разделитель `;`) — как в Python-версии.
+    #[default]
+    Csv,
+    /// Книга Excel: CSV конвертируется и удаляется.
+    Xlsx,
+}
+
+static OUTPUT_FORMAT: OnceLock<Mutex<OutputFormat>> = OnceLock::new();
+
+fn format_cell() -> &'static Mutex<OutputFormat> {
+    OUTPUT_FORMAT.get_or_init(|| Mutex::new(OutputFormat::Csv))
+}
+
+/// Выбранный пользователем формат отчётов.
+pub fn set_output_format(format: OutputFormat) {
+    *format_cell().lock().unwrap() = format;
+}
+
+/// Текущий формат отчётов (по умолчанию CSV).
+pub fn output_format() -> OutputFormat {
+    *format_cell().lock().unwrap()
+}
+
+/// Завершить отчёт: при выбранном XLSX — конвертировать CSV и удалить его.
+///
+/// Возвращает путь к актуальному файлу. При ошибке конвертации CSV
+/// сохраняется — данные не теряются, в журнал попадает ошибка.
+pub fn finalize_report(csv: std::path::PathBuf) -> std::path::PathBuf {
+    finalize_report_logged(csv, None)
+}
+
+/// То же, но с записью ошибки в журнал операции.
+pub fn finalize_report_logged(
+    csv: std::path::PathBuf,
+    log: Option<&LogSink>,
+) -> std::path::PathBuf {
+    if output_format() == OutputFormat::Csv {
+        remember_report(&csv);
+        return csv;
+    }
+    let xlsx = csv.with_extension("xlsx");
+    match xlsx::csv_to_xlsx(&csv, &xlsx) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&csv);
+            remember_report(&xlsx);
+            xlsx
+        }
+        Err(e) => {
+            if let Some(l) = log {
+                emit(
+                    l,
+                    i18n::fill(i18n::tr(sink_lang(l), "xlsx_convert_failed"), &[e]),
+                );
+            }
+            csv
+        }
+    }
+}
+
+
+static OUTPUT_DIR: OnceLock<Mutex<Option<std::path::PathBuf>>> = OnceLock::new();
+static LAST_REPORT: OnceLock<Mutex<Option<std::path::PathBuf>>> = OnceLock::new();
+
+fn output_dir_cell() -> &'static Mutex<Option<std::path::PathBuf>> {
+    OUTPUT_DIR.get_or_init(|| Mutex::new(None))
+}
+
+fn last_report_cell() -> &'static Mutex<Option<std::path::PathBuf>> {
+    LAST_REPORT.get_or_init(|| Mutex::new(None))
+}
+
+/// Единая папка для результатов всех операций (выбирается в настройках).
+/// `None` — писать рядом с приложением (рабочий каталог).
+pub fn set_output_dir(dir: Option<std::path::PathBuf>) {
+    *output_dir_cell().lock().unwrap() = dir;
+}
+
+/// Текущая папка результатов.
+pub fn output_dir() -> Option<std::path::PathBuf> {
+    output_dir_cell().lock().unwrap().clone()
+}
+
+/// Полный путь для файла отчёта: имя кладётся в папку результатов.
+/// Каталог создаётся, если его ещё нет.
+pub fn resolve_report_path(name: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    match output_dir() {
+        Some(dir) => {
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(name)
+        }
+        None => std::path::PathBuf::from(name.as_ref()),
+    }
+}
+
+/// Путь последнего созданного отчёта — GUI использует его, чтобы открыть
+/// результат после завершения операции.
+pub fn last_report() -> Option<std::path::PathBuf> {
+    last_report_cell().lock().unwrap().clone()
+}
+
+/// Забыть последний отчёт (вызывается перед новой операцией).
+pub fn clear_last_report() {
+    *last_report_cell().lock().unwrap() = None;
+}
+
+fn remember_report(path: &std::path::Path) {
+    *last_report_cell().lock().unwrap() = Some(path.to_path_buf());
+}
+
+/// Сток логов/прогресса (аналог print -> ConsoleRedirector в Python-версии).
+/// `progress` — необязательный колбэк (current, total); total == 0 означает
+/// неопределённый прогресс (бар-индикатор без доли).
+/// `lang` — язык сообщений, генерируемых в этот сток.
+pub struct Sink {
+    log: Box<dyn FnMut(String) + Send>,
+    progress: Option<Box<dyn FnMut(usize, usize) + Send>>,
+    lang: Lang,
+}
+
+impl Sink {
+    /// Сток только с логами (прогресс игнорируется) — для тестов/CLI.
+    pub fn text_only(f: impl FnMut(String) + Send + 'static) -> Self {
+        Self {
+            log: Box::new(f),
+            progress: None,
+            lang: Lang::Ru,
+        }
+    }
+
+    /// Сток с логами и прогрессом.
+    pub fn with_progress(
+        f: impl FnMut(String) + Send + 'static,
+        p: impl FnMut(usize, usize) + Send + 'static,
+    ) -> Self {
+        Self {
+            log: Box::new(f),
+            progress: Some(Box::new(p)),
+            lang: Lang::Ru,
+        }
+    }
+
+    /// Язык сообщений для этого стока (GUI задаёт перед запуском операции).
+    pub fn with_lang(mut self, lang: Lang) -> Self {
+        self.lang = lang;
+        self
+    }
+
+    pub fn lang(&self) -> Lang {
+        self.lang
+    }
+}
+
+/// Язык стока (без блокировки на время форматирования строки — отдельная
+/// блокировка в `emit` всё равно последует).
+pub fn sink_lang(log: &LogSink) -> Lang {
+    log.lock().ok().map(|s| s.lang).unwrap_or(Lang::Ru)
+}
+
+/// Общий тип стока: потокобезопасная обёртка над [`Sink`].
+/// Функции core принимают `&LogSink` — как раньше.
+pub type LogSink = Arc<Mutex<Sink>>;
+
+/// Отправить строку в сток.
+pub fn emit(log: &LogSink, msg: impl Into<String>) {
+    if let Ok(mut s) = log.lock() {
+        (s.log)(msg.into());
+    }
+}
+
+/// Отправить прогресс (current, total); total == 0 — неопределённый.
+pub fn emit_progress(log: &LogSink, current: usize, total: usize) {
+    if let Ok(mut s) = log.lock() {
+        if let Some(p) = s.progress.as_mut() {
+            p(current, total);
+        }
+    }
+}
+
+/// Сток, пишущий в stdout (логи) и stderr (прогресс) — для тестов и CLI.
+pub fn stdout_sink() -> LogSink {
+    Arc::new(Mutex::new(Sink::with_progress(
+        |msg: String| println!("{msg}"),
+        |c: usize, t: usize| eprintln!("[PROGRESS {c}/{t}]"),
+    )))
+}

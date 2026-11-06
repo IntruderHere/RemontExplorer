@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+
+# Локальные настройки и артефакты
+/config/
+*.zip
+*.exe
+logs/
+
+# macOS
+.DS_Store
