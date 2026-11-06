@@ -36,7 +36,7 @@
 │   │   ├── src/i18n.rs          # ПЕРЕВОДЫ GUI (ru+en) + тексты справки
 │   │   ├── src/schedule.rs      # модель заданий расписания (config/schedule.json)
 │   │   ├── examples/probe_modal.rs # headless-замер размера модального окна
-│   │   ├── icons/               # filemanager.ico + app.png (вшиты в exe)
+│   │   ├── icons/               # remont_explorer.ico + app.png (вшиты в exe)
 │   │   └── build.rs             # embed-resource (иконка exe)
 │   └── target/x86_64-pc-windows-gnu/release/remont_explorer.exe
 ├── RemontExplorer-windows-x64.zip  # готовый артефакт для Windows
