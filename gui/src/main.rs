@@ -725,7 +725,7 @@ impl App {
 
                             // ---- Проверка обновлений ----
                             if let Some(info) = &self.update_info {
-                                let text = self.tf("upd.available", &[info.version.clone()]);
+                                let text = self.tf("upd.available", std::slice::from_ref(&info.version));
                                 ui.label(
                                     RichText::new(text)
                                         .strong()
@@ -739,7 +739,7 @@ impl App {
                                 ui.label(RichText::new(self.t("upd.checking")).weak());
                             } else if let Some(err) = &self.update_error {
                                 ui.label(
-                                    RichText::new(self.tf("upd.error", &[err.clone()]))
+                                    RichText::new(self.tf("upd.error", std::slice::from_ref(err)))
                                         .weak()
                                         .color(egui::Color32::from_rgb(180, 60, 60)),
                                 );
@@ -2356,7 +2356,7 @@ impl eframe::App for App {
                         self.pending = Some(Pending::About);
                     }
                     if let Some(info) = &self.update_info {
-                        let label = self.tf("upd.banner", &[info.version.clone()]);
+                        let label = self.tf("upd.banner", std::slice::from_ref(&info.version));
                         let url = info.url.clone();
                         if ui
                             .button(RichText::new(label).color(egui::Color32::from_rgb(200, 120, 0)))
@@ -3104,6 +3104,7 @@ mod tests {
             report_format: OutputFormat::Xlsx,
             output_dir: "D:\\Reports".to_string(),
             open_result: true,
+            check_updates: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: UiConfig = serde_json::from_str(&json).unwrap();
@@ -3113,6 +3114,7 @@ mod tests {
         assert_eq!(back.report_format, OutputFormat::Xlsx);
         assert_eq!(back.output_dir, "D:\\Reports");
         assert!(back.open_result);
+        assert!(!back.check_updates);
         // Старый файл без поля читается с значением по умолчанию.
         let old: UiConfig = serde_json::from_str(r#"{"theme":"light","lang":"ru"}"#).unwrap();
         assert!(old.close_to_tray, "по умолчанию сворачивание включено");
