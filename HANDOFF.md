@@ -268,12 +268,30 @@ Windows не присылает WM_PAINT.
 запросы к API выполнялись с `curl --resolve api.github.com:443:140.82.112.6`. На обычной сети
 Windows этого не требуется; запасной Atom-канал закрывает случай корпоративной блокировки.
 
+### 3.14. Исправление: не открывался файл результата (v2.0.1)
+**Симптом:** после сканирования из контекстного меню Проводника Windows показывал
+«Windows cannot find `files_info_260885_Новые_материалы_….xlsx`».
+
+**Причина:** файл открывался командой `cmd /C start "" <путь>`. Два дефекта:
+1. путь был **относительным** (при `output_dir` = пусто `resolve_report_path` возвращал имя файла),
+2. `cmd.exe` преобразует аргументы в ANSI — **кириллица в имени искажалась**.
+
+**Решение:**
+- `resolve_report_path` теперь всегда возвращает **абсолютный** путь (при пустой папке результатов
+  — от текущего каталога).
+- Открытие результата и ссылок идёт через **`ShellExecuteW`** (Unicode, ассоциации Windows),
+  путь предварительно приводится `canonicalize`. Вызовы `cmd` из GUI удалены полностью.
+- Версия поднята до **2.0.1**, выпущен релиз
+  https://github.com/IntruderHere/RemontExplorer/releases/tag/v2.0.1 с архивом.
+- Тесты: `default_report_path_is_absolute` (ядро: путь абсолютный, кириллица сохраняется)
+  и `result_file_opens_without_cmd` (GUI: ShellExecute + canonicalize, без `cmd`).
+
 ## 4. Состояние проверок (на момент передачи)
 
 | Проверка | Результат |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | **58 тестов, 0 провалов**: 35 GUI-unit + интеграционные наборы + i18n_smoke + xlsx_output |
+| `cargo test --workspace` | **60 тестов, 0 провалов**: 35 GUI-unit + интеграционные наборы + i18n_smoke + xlsx_output |
 | `cargo clippy --workspace --all-targets` | 0 warnings |
 | `cargo run --example e2e_smoke` | «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ (7 режимов)» |
 | `cargo run --example probe_modal` | 412×117 (компактно) |
