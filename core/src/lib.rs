@@ -133,7 +133,12 @@ pub fn resolve_report_path(name: impl AsRef<std::path::Path>) -> std::path::Path
             let _ = std::fs::create_dir_all(&dir);
             dir.join(name)
         }
-        None => std::path::PathBuf::from(name.as_ref()),
+        // Абсолютный путь обязателен: приложение может быть запущено из
+        // Проводника с другим рабочим каталогом, и относительное имя файла
+        // потом не находится при открытии.
+        None => std::env::current_dir()
+            .map(|cwd| cwd.join(name.as_ref()))
+            .unwrap_or_else(|_| std::path::PathBuf::from(name.as_ref())),
     }
 }
 

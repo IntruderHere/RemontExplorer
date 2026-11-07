@@ -103,8 +103,14 @@ fn scan_non_master_creates_timestamped_file() {
     let log = stdout_sink();
 
     let (path, stats) = scan_folder(&root, None, 4, &stop, &log).expect("сканирование");
-    let name = path.to_string_lossy().into_owned();
+    // Путь абсолютный (иначе файл не находится при открытии из другого CWD),
+    // проверяем именно имя файла.
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     assert!(name.starts_with("files_info_data_"), "имя: {name}");
+    assert!(path.is_absolute(), "путь не абсолютный: {}", path.display());
     assert!(path.exists());
     assert_eq!(stats.files, 1);
     let _ = fs::remove_file(&path); // не засоряем CWD

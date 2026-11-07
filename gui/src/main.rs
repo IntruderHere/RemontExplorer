@@ -230,9 +230,7 @@ fn open_url(url: &str) {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(url).creation_flags(CREATE_NO_WINDOW).spawn();
+        open_with_shell(Path::new(url));
     }
     #[cfg(not(windows))]
     {
@@ -240,21 +238,51 @@ fn open_url(url: &str) {
     }
 }
 
-/// Открыть полученный файл (отчёт) в приложении по умолчанию.
+/// Открыть полученный файл (отчёт) ассоциированным приложением.
+///
+/// Используется `ShellExecuteW`, а не `cmd /C start`: командная строка
+/// преобразует аргументы в ANSI, из-за чего имена с кириллицей (например,
+/// `files_info_260885_Новые_материалы_….xlsx`) искажаются и файл «не
+/// находится». `ShellExecuteW` работает в Unicode и с абсолютным путём.
 fn open_result_file(path: &Path) {
-    if !path.exists() {
-        return;
-    }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // `start` открывает файл ассоциированным приложением (Excel для xlsx).
-        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(path).creation_flags(CREATE_NO_WINDOW).spawn();
+        // Абсолютный путь — чтобы файл нашёлся при любом рабочем каталоге.
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if abs.exists() {
+            open_with_shell(&abs);
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("open").arg(path).spawn();
+        if path.exists() {
+            let _ = std::process::Command::new("open").arg(path).spawn();
+        }
+    }
+}
+
+/// Открыть файл или ссылку средствами оболочки Windows (Unicode-безопасно).
+#[cfg(windows)]
+fn open_with_shell(target: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let op = wide(std::ffi::OsStr::new("open"));
+    let file = wide(target.as_os_str());
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -3423,6 +3451,30 @@ mod tests {
         assert!(
             code.contains("remont_core::last_report()"),
             "результат не открывается после операции"
+        );
+    }
+
+    /// Файл результата открывается через ShellExecute с абсолютным путём:
+    /// `cmd /C start` искажал кириллицу в именах (Windows «не находит файл»).
+    #[test]
+    fn result_file_opens_without_cmd() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет блока тестов")];
+        assert!(
+            code.contains("ShellExecuteW"),
+            "файл открывается не через ShellExecute"
+        );
+        assert!(
+            code.contains("canonicalize"),
+            "путь не приводится к абсолютному"
+        );
+        // В функции открытия результата не должно быть вызова cmd.
+        let start = code.find("fn open_result_file").expect("нет функции");
+        let end = start + code[start..].find("\n}\n").unwrap_or(600);
+        let body = &code[start..end];
+        assert!(
+            !body.contains("cmd"),
+            "открытие всё ещё идёт через командную строку"
         );
     }
 }

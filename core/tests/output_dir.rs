@@ -2,7 +2,8 @@
 //! а путь последнего отчёта доступен GUI (для настройки «открыть файл»).
 
 use remont_core::{
-    clear_last_report, last_report, scan_folder, set_output_dir, Sink, StopToken,
+    clear_last_report, last_report, resolve_report_path, scan_folder, set_output_dir, Sink,
+    StopToken,
 };
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -46,4 +47,20 @@ fn reports_go_to_configured_folder() {
     assert!(last_report().is_none(), "последний отчёт не сбрасывается");
 
     let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn default_report_path_is_absolute() {
+    set_output_dir(None);
+    let p = resolve_report_path("files_info_260885_Новые_материалы_20261106_164503.xlsx");
+    assert!(
+        p.is_absolute(),
+        "путь отчёта должен быть абсолютным: {}",
+        p.display()
+    );
+    assert!(
+        p.to_string_lossy().contains("Новые_материалы"),
+        "кириллица в имени искажена: {}",
+        p.display()
+    );
 }
