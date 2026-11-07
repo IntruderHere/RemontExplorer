@@ -2248,22 +2248,7 @@ impl eframe::App for App {
 
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(self.t("btn.about")).clicked() {
-                        self.pending = Some(Pending::About);
-                    }
-                    if let Some(info) = &self.update_info {
-                        let label = self.tf("upd.banner", std::slice::from_ref(&info.version));
-                        let url = info.url.clone();
-                        if ui.button(RichText::new(label).color(egui::Color32::from_rgb(200, 120, 0))).clicked()
-                        {
-                            open_url(&url);
-                        }
-                    }
-                });
-            });
-            ui.separator();
+            // Одна строка: вкладки слева, «О приложении» — в правом краю.
             ui.horizontal(|ui| {
                 let tw = format!("  {}  ", self.t("tab.work"));
                 let ts = format!("  {}  ", self.t("tab.settings"));
@@ -2280,7 +2265,24 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.top_tab, TopTab::Schedule, tp);
                     ui.selectable_value(&mut self.top_tab, TopTab::Help, th);
                 }
+                // Правая часть той же строки (right_to_left: первый элемент — правый).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(self.t("btn.about")).clicked() {
+                        self.pending = Some(Pending::About);
+                    }
+                    if let Some(info) = &self.update_info {
+                        let label = self.tf("upd.banner", std::slice::from_ref(&info.version));
+                        let url = info.url.clone();
+                        if ui
+                            .button(RichText::new(label).color(egui::Color32::from_rgb(200, 120, 0)))
+                            .clicked()
+                        {
+                            open_url(&url);
+                        }
+                    }
+                });
             });
+            ui.separator();
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -3476,5 +3478,33 @@ mod tests {
             !body.contains("cmd"),
             "открытие всё ещё идёт через командную строку"
         );
+    }
+
+    /// «О приложении» — в одной строке с вкладками, у правого края:
+    /// отдельной верхней строки больше нет, кнопка идёт после вкладок
+    /// внутри right_to_left-раскладки.
+    #[test]
+    fn about_button_shares_row_with_tabs() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет блока тестов")];
+        let start = code
+            .find("TopBottomPanel::top(\"header\")")
+            .expect("нет шапки");
+        let end = start + code[start..].find("CentralPanel::default()").expect("нет конца шапки");
+        let header = &code[start..end];
+
+        assert_eq!(
+            header.matches("ui.horizontal(").count(),
+            1,
+            "в шапке должна быть ровно одна строка"
+        );
+        let tabs = header.find("tab.work").expect("нет вкладок");
+        let about = header.find("btn.about").expect("нет кнопки «О приложении»");
+        assert!(
+            about > tabs,
+            "кнопка «О приложении» должна быть в строке вкладок, после них"
+        );
+        let rtl = header.find("right_to_left").expect("нет правого выравнивания");
+        assert!(rtl < about, "кнопка не прижата к правому краю");
     }
 }
