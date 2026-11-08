@@ -1871,7 +1871,8 @@ impl App {
         let avail_h = ui.available_height();
         ui.horizontal(|ui| {
             let list_w = 220.0;
-            let right_margin = 12.0;
+            // Запас справа: кнопки и поле не должны упираться в край окна.
+            let right_margin = 28.0;
             let editor_w = (full_w - list_w - 14.0 - right_margin).max(320.0);
             ui.vertical(|ui| {
                 ui.set_width(list_w);
@@ -1911,7 +1912,7 @@ impl App {
         ui.label(RichText::new(
             self.t("lbl.paths_hint"),
         ).weak());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(self.t("btn.load")).clicked() {
                 // Выбор файла на диске (раньше кнопка просто перечитывала
                 // уже открытый конфиг и выглядела «неработающей»).
@@ -1944,8 +1945,9 @@ impl App {
             }
         });
         let h = (ui.available_height() - 34.0).max(60.0);
+        let w = ui.available_width();
         ui.add_sized(
-            [f32::INFINITY, h],
+            [w, h],
             TextEdit::multiline(&mut self.editor_single).font(FontId::monospace(13.0)),
         );
         ui.horizontal(|ui| {
@@ -1979,7 +1981,7 @@ impl App {
         ui.label(RichText::new(
             self.t("lbl.pairs_hint"),
         ).weak());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(self.t("btn.load")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_file() {
                     let (l, r) = load_pair_file(&p);
@@ -3388,6 +3390,21 @@ mod tests {
     /// `set_current_dir` — глобальное состояние процесса.
     static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Срез строки по длине в символах (без паники на середине UTF-8).
+    fn head_of(src: &str, len: usize) -> &str {
+        let mut end = len.min(src.len());
+        while end > 0 && !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        &src[..end]
+    }
+
+    /// Хвост строки от позиции (позиция — начало символа).
+    fn tail_of(src: &str, start: usize, len: usize) -> &str {
+        let rest = &src[start..];
+        head_of(rest, len)
+    }
+
     fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
         CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -4671,7 +4688,7 @@ mod tests {
 
         // 1) Заголовок «История выполнений» не окрашен.
         let h = code.find("fn history_tab").expect("нет вкладки истории");
-        let block = &code[h..h + 1500];
+        let block = tail_of(code, h, 1500);
         let title = block.find("hist.title").expect("нет заголовка истории");
         let line = &block[title..title + 140];
         assert!(!line.contains(".color("), "заголовок истории всё ещё цветной");
@@ -4683,12 +4700,12 @@ mod tests {
             !head.contains("ui.add_space(10.0)"),
             "отступ снова отрывает верхние настройки от меню"
         );
-        let tab = &code[s..s + 3000];
+        let tab = tail_of(code, s, 3000);
         let lower = tab
             .find("ui.add_space(12.0)")
             .expect("нет отступа перед разделом режимов");
         assert!(
-            tab[lower..lower + 200].contains("ui.horizontal"),
+            tail_of(tab, lower, 200).contains("ui.horizontal"),
             "отступ стоит не перед разделом «Выберите режим»"
         );
 
@@ -4790,6 +4807,25 @@ mod tests {
             });
         }
         assert_eq!(app.help_sel, i18n::help(Lang::Ru).len() - 1);
+    }
+
+
+    /// Редактор настроек не наезжает на правый край: есть запас справа,
+    /// поле ввода не растягивается «в бесконечность», кнопки переносятся.
+    #[test]
+    fn settings_editor_keeps_right_margin() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let s = code.find("fn settings_tab").expect("нет настроек");
+        let tab = tail_of(code, s, 3600);
+        assert!(
+            tab.contains("let right_margin = 28.0;"),
+            "мал запас справа у редактора настроек"
+        );
+        let e = code.find("fn single_editor").expect("нет редактора");
+        let block = tail_of(code, e, 2500);
+        assert!(!block.contains("f32::INFINITY"), "поле ввода снова растягивается за край");
+        assert!(block.contains("ui.horizontal_wrapped"), "кнопки не переносятся");
     }
 
 }
