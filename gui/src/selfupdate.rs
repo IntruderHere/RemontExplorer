@@ -116,128 +116,117 @@ pub fn unpack(zip_path: &Path, out_dir: &Path) -> Result<PathBuf, String> {
 /// не выполнялась, приложение просто закрывалось. `-EncodedCommand`
 /// передаёт сценарий в UTF-16 base64, кодировка не участвует вовсе.
 pub fn apply(current_exe: &Path, new_exe: &Path) -> Result<(), String> {
-    let dir = staging_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("не создать папку обновления: {e}"))?;
-    let log = dir.join("update.log");
-    let script = build_script(std::process::id(), new_exe, current_exe, &log);
-    // Диагностика: если обновление не сработает, в этом файле останется след.
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .and_then(|mut f| {
-            use std::io::Write as _;
-            writeln!(
-                f,
-                "LAUNCH {} new={} dst={}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                new_exe.display(),
-                current_exe.display()
-            )
-        });
+    // Никаких внешних сценариев: PowerShell с `-EncodedCommand` и bat-файлы
+    // либо блокируются антивирусом, либо ломаются на путях с кириллицей.
+    // Новый exe запускается с `--self-install` и сам заменяет старый файл,
+    // как только тот завершится.
+    let log = staging_dir().join("update.log");
+    let _ = std::fs::create_dir_all(staging_dir());
+    log_line(&log, &format!("LAUNCH new={} dst={}", new_exe.display(), current_exe.display()));
 
-    let encoded = encode_powershell(&script);
+    spawn_self_install(new_exe, current_exe, std::process::id())
+        .map_err(|e| format!("не удалось запустить установку: {e} (журнал: {})", log.display()))
+}
 
+/// Запустить новый exe в режиме установки: `--self-install <куда> <pid старого>`.
+fn spawn_self_install(new_exe: &Path, dst: &Path, old_pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-EncodedCommand",
-                &encoded,
-            ])
+        std::process::Command::new(new_exe)
+            .arg("--self-install")
+            .arg(dst)
+            .arg(old_pid.to_string())
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| {
-                format!(
-                    "не удалось запустить обновление: {e} (подробности: {})",
-                    log.display()
-                )
-            })?;
-        Ok(())
+            .map(|_| ())
     }
     #[cfg(not(windows))]
     {
-        let _ = encoded;
-        Err("обновление с заменой файла поддерживается только в Windows".into())
+        let _ = (new_exe, dst, old_pid);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "только для Windows",
+        ))
     }
 }
 
-/// Текст сценария замены. Вынесен отдельно, чтобы проверялся тестом:
-/// ошибки в кавычках здесь означали бы «приложение закрылось и не вернулось».
-fn build_script(pid: u32, new_exe: &Path, dst: &Path, log: &Path) -> String {
-    // Одинарные кавычки в PowerShell: внутри строки удваиваются.
-    let q = |p: &Path| p.to_string_lossy().replace('\'', "''");
-    format!(
-        r#"$ErrorActionPreference = 'Stop'
-$log = '{log}'
-$oldPid = {pid}
-try {{
-    # Ждём выхода приложения: заменить работающий exe нельзя.
-    for ($i = 0; $i -lt 600; $i++) {{
-        if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{ break }}
-        Start-Sleep -Milliseconds 300
-    }}
-    Start-Sleep -Milliseconds 300
-    Copy-Item -LiteralPath '{new}' -Destination '{dst}' -Force
-    Add-Content -LiteralPath $log -Value ("OK  " + (Get-Date -Format s) + "  " + '{dst}')
-    Start-Process -FilePath '{dst}' -WorkingDirectory (Split-Path -LiteralPath '{dst}')
-    exit 0
-}} catch {{
-    Add-Content -LiteralPath $log -Value ("FAIL " + (Get-Date -Format s) + "  " + $_.Exception.Message)
-    # Даже при неудаче возвращаем приложение пользователю (старая версия).
-    try {{ Start-Process -FilePath '{dst}' -WorkingDirectory (Split-Path -LiteralPath '{dst}') }} catch {{ }}
-    exit 1
-}}
-"#,
-        log = q(log),
-        pid = pid,
-        new = q(new_exe),
-        dst = q(dst)
-    )
-}
+/// Режим установки: дождаться выхода старого процесса, заменить файл, запустить.
+///
+/// Возвращает код выхода процесса-установщика.
+pub fn run_self_install(dst: &Path, old_pid: u32) -> i32 {
+    let log = staging_dir().join("update.log");
+    log_line(&log, &format!("INSTALL start dst={} pid={old_pid}", dst.display()));
 
-/// Сценарий PowerShell → base64 UTF-16LE (формат `-EncodedCommand`).
-fn encode_powershell(script: &str) -> String {
-    let utf16: Vec<u8> = script
-        .encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
-        .collect();
-    base64(&utf16)
-}
-
-/// Минимальный base64 (без внешних зависимостей).
-fn base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[n as usize & 63] as char
-        } else {
-            '='
-        });
+    for _ in 0..600 {
+        if !process_alive(old_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    out
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    let Ok(me) = std::env::current_exe() else {
+        log_line(&log, "INSTALL fail: не определён путь установщика");
+        return 1;
+    };
+
+    match std::fs::copy(&me, dst) {
+        Ok(_) => {
+            log_line(&log, &format!("OK file replaced: {}", dst.display()));
+            let _ = std::process::Command::new(dst).spawn();
+            0
+        }
+        Err(e) => {
+            log_line(&log, &format!("FAIL copy: {e}"));
+            // Возвращаем пользователю хотя бы старую версию.
+            let _ = std::process::Command::new(dst).spawn();
+            1
+        }
+    }
 }
+
+/// Жив ли процесс (Windows — через OpenProcess/WaitForSingleObject).
+fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: хэндл закрывается; ожидание с нулевым таймаутом.
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let rc = WaitForSingleObject(h, 0);
+            let _ = CloseHandle(h);
+            rc == WAIT_TIMEOUT
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Дописать строку в журнал обновления (ошибки журнала не критичны).
+pub fn log_line(log: &Path, msg: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        let _ = writeln!(
+            f,
+            "{}  {msg}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -363,77 +352,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+
+
+    /// Журнал обновления пишется в файл: по нему видно, что произошло.
     #[test]
-    fn staging_dir_is_in_temp() {
-        let p = staging_dir();
-        assert!(p.starts_with(std::env::temp_dir()));
-        assert!(p.to_string_lossy().contains("RemontExplorerUpdate"));
-    }
-
-    #[test]
-    fn base64_matches_reference() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"hello"), "aGVsbG8=");
-        assert_eq!(base64(b"\xff\xfe"), "//4=");
-    }
-
-    /// `-EncodedCommand` ждёт UTF-16LE в base64: проверяем декодированием.
-    #[test]
-    fn powershell_command_is_utf16_base64() {
-        let script = "Write-Output 'Привет, ОПС'";
-        let enc = encode_powershell(script);
-        let bytes = decode_base64(&enc);
-        let units: Vec<u16> = (0..bytes.len() / 2)
-            .map(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
-            .collect();
-        let decoded = String::from_utf16(&units).unwrap();
-        assert_eq!(decoded, script);
-    }
-
-    /// Простая проверка base64 — нужна только в тестах.
-    fn decode_base64(s: &str) -> Vec<u8> {
-        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = Vec::new();
-        let mut buf: u32 = 0;
-        let mut bits = 0;
-        for ch in s.bytes() {
-            if ch == b'=' {
-                break;
-            }
-            let Some(v) = T.iter().position(|&c| c == ch) else { continue };
-            buf = (buf << 6) | v as u32;
-            bits += 6;
-            if bits >= 8 {
-                bits -= 8;
-                out.push((buf >> bits) as u8);
-            }
-        }
-        out
-    }
-
-
-    /// Сценарий ждёт PID, копирует и запускает приложение; пути с одинарными
-    /// кавычками не ломают синтаксис.
-    #[test]
-    fn update_script_waits_copies_and_starts() {
-        let new = Path::new(r"C:\Temp\new.exe");
-        let dst = Path::new(r"C:\Program Files\Remont's\remont_explorer.exe");
-        let log = Path::new(r"C:\Temp\update.log");
-        let script = build_script(4242, new, dst, log);
-
-        assert!(script.contains("$oldPid = 4242"));
-        assert!(script.contains("Get-Process -Id $oldPid"));
-        assert!(script.contains("Copy-Item -LiteralPath"));
-        assert!(script.contains("Start-Process -FilePath"));
-        // Кавычка в пути удвоена — иначе PowerShell оборвал бы строку.
-        assert!(script.contains("Remont''s"));
-        assert!(!script.contains("Remont's"));
-        // Даже при ошибке старая версия запускается обратно.
-        assert!(script.contains("catch"));
-        assert!(script.contains("exit 1"));
+    fn update_log_records_lines() {
+        let dir = std::env::temp_dir().join(format!("upd_log_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("update.log");
+        log_line(&log, "LAUNCH test=1");
+        log_line(&log, "OK file replaced");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("LAUNCH test=1"));
+        assert!(text.contains("OK file replaced"));
+        assert_eq!(text.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }

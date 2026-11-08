@@ -3366,6 +3366,18 @@ fn main() -> eframe::Result<()> {
     // Консольный режим (`--cli ...`): выполняем операцию и выходим, окно
     // не создаётся. Без `--cli` аргументы обрабатывает GUI (контекстное меню).
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Режим установки обновления: новый exe заменяет старый файл и запускает
+    // его. Окно не создаётся — процесс живёт несколько секунд.
+    if let Some(i) = args.iter().position(|a| a == "--self-install") {
+        let dst = args.get(i + 1).map(std::path::PathBuf::from);
+        let pid = args.get(i + 2).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        if let Some(dst) = dst {
+            std::process::exit(selfupdate::run_self_install(&dst, pid));
+        }
+        std::process::exit(2);
+    }
+
     // Консольный разбор запускается только при --cli/--help: иначе параметры
     // окна (`--tab settings`, `--minimized`) считались бы ошибкой CLI.
     let wants_cli = args
