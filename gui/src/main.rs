@@ -1245,12 +1245,13 @@ impl App {
             ("mode.create", "📁"),
             ("mode.scan", "🔍"),
             ("mode.compare", "⚖"),
-            ("mode.cleanup", "🧹"),
+            ("mode.cleanup", "♻"),
             ("mode.copy", "📋"),
             ("mode.duplicates", "🔎"),
         ];
 
-        ui.horizontal(|ui| {
+        // Перенос вместо обрезки: при узком окне «Дубликаты» уезжали за край.
+        ui.horizontal_wrapped(|ui| {
             for (i, def) in MODES.iter().enumerate() {
                 let (key, icon) = mode_names[i];
                 let label = self.t(key);
@@ -5323,6 +5324,24 @@ mod tests {
             !block.contains("ui.add_space("),
             "перед флажками Windows осталась отбивка"
         );
+    }
+
+
+    /// Иконки режимов есть в шрифте egui: 🧹 (U+1F9F9) отсутствовала и
+    /// рисовалась пустым квадратом. Ряд режимов переносится, а не обрезается.
+    #[test]
+    fn mode_icons_render_and_row_wraps() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(!code.contains('\u{1F9F9}'), "вернулась иконка без глифа (🧹)");
+        assert!(!code.contains("🧹"), "вернулась иконка без глифа");
+        let start = code.find("modes_row").unwrap_or(0);
+        let panel = &code[code.find("fn work_tab").unwrap()..];
+        assert!(
+            panel.contains("ui.horizontal_wrapped(|ui|"),
+            "ряд режимов не переносится — кнопки обрезаются"
+        );
+        let _ = start;
     }
 
 }
