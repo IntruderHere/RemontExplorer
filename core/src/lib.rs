@@ -65,12 +65,12 @@ fn format_cell() -> &'static Mutex<OutputFormat> {
 
 /// Выбранный пользователем формат отчётов.
 pub fn set_output_format(format: OutputFormat) {
-    *format_cell().lock().unwrap() = format;
+    *format_cell().lock().unwrap_or_else(|e| e.into_inner()) = format;
 }
 
 /// Текущий формат отчётов (по умолчанию CSV).
 pub fn output_format() -> OutputFormat {
-    *format_cell().lock().unwrap()
+    *format_cell().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Завершить отчёт: при выбранном XLSX — конвертировать CSV и удалить его.
@@ -124,12 +124,12 @@ fn last_report_cell() -> &'static Mutex<Option<std::path::PathBuf>> {
 /// Единая папка для результатов всех операций (выбирается в настройках).
 /// `None` — писать рядом с приложением (рабочий каталог).
 pub fn set_output_dir(dir: Option<std::path::PathBuf>) {
-    *output_dir_cell().lock().unwrap() = dir;
+    *output_dir_cell().lock().unwrap_or_else(|e| e.into_inner()) = dir;
 }
 
 /// Текущая папка результатов.
 pub fn output_dir() -> Option<std::path::PathBuf> {
-    output_dir_cell().lock().unwrap().clone()
+    output_dir_cell().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Полный путь для файла отчёта: имя кладётся в папку результатов.
@@ -143,13 +143,38 @@ pub fn resolve_report_path(name: impl AsRef<std::path::Path>) -> std::path::Path
         // Абсолютный путь обязателен: приложение может быть запущено из
         // Проводника с другим рабочим каталогом, и относительное имя файла
         // потом не находится при открытии.
-        None => std::env::current_dir()
-            .map(|cwd| cwd.join(name.as_ref()))
-            .unwrap_or_else(|_| std::path::PathBuf::from(name.as_ref())),
+        None => default_report_dir().join(name.as_ref()),
     };
     // Два запуска в одну секунду дают одинаковое имя отчёта — второй
     // затирал первый. Дубли добавляем суффиксом _2, _3…
     unique_path(path)
+}
+
+/// Папка отчётов по умолчанию: рядом с приложением, если туда можно писать.
+///
+/// Приложение могут положить в `Program Files` или другой каталог только для
+/// чтения — тогда отчёты уходят в `Документы\RemontExplorer\reports`, чтобы
+/// операция не срывалась на последнем шаге.
+fn default_report_dir() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if is_writable_dir(&cwd) {
+        return cwd;
+    }
+    let fallback = crate::paths::data_dir().join("reports");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
+}
+
+/// Можно ли создать файл в каталоге (проверка пробным файлом).
+fn is_writable_dir(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".remont_probe_{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Свободное имя рядом с указанным: при совпадении добавляется `_2`, `_3`…
@@ -182,16 +207,16 @@ pub fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
 /// Путь последнего созданного отчёта — GUI использует его, чтобы открыть
 /// результат после завершения операции.
 pub fn last_report() -> Option<std::path::PathBuf> {
-    last_report_cell().lock().unwrap().clone()
+    last_report_cell().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Забыть последний отчёт (вызывается перед новой операцией).
 pub fn clear_last_report() {
-    *last_report_cell().lock().unwrap() = None;
+    *last_report_cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 fn remember_report(path: &std::path::Path) {
-    *last_report_cell().lock().unwrap() = Some(path.to_path_buf());
+    *last_report_cell().lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
 }
 
 /// Сток логов и прогресса операции.

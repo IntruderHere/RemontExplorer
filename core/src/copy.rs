@@ -54,12 +54,17 @@ pub struct CopyReport {
     pub mismatches: Vec<(PathBuf, PathBuf)>,
     /// Источники, которых не оказалось на месте.
     pub missing: usize,
+    /// Файл пар не прочитан (нет файла, он пуст или не содержит пар).
+    pub config_error: bool,
 }
 
 impl CopyReport {
     /// Всё ли прошло чисто (нет ни потерь, ни расхождений).
     pub fn is_clean(&self) -> bool {
-        self.copied == self.total && self.mismatches.is_empty() && self.missing == 0
+        self.copied == self.total
+            && self.mismatches.is_empty()
+            && self.missing == 0
+            && !self.config_error
     }
 }
 const RETRIES: u32 = 3;
@@ -212,7 +217,10 @@ pub fn copy_files_from_list_opts(
     let pairs = read_pairs_csv(config_file);
     if pairs.is_empty() {
         em!(log, "copy_config_missing", config_file.display());
-        return CopyReport::default();
+        return CopyReport {
+            config_error: true,
+            ..Default::default()
+        };
     }
 
     let mut tasks: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -452,6 +460,7 @@ pub fn copy_files_from_list_opts(
         verified,
         mismatches: mism,
         missing,
+        config_error: false,
     }
 }
 

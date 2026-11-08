@@ -428,7 +428,9 @@ pub fn run(opts: &CliOptions) -> i32 {
                 &log,
             );
             entry.ok = report.copied;
-            entry.errors = report.total.saturating_sub(report.copied) + report.mismatches.len();
+            entry.errors = report.total.saturating_sub(report.copied)
+                + report.mismatches.len()
+                + usize::from(report.config_error);
             if !report.is_clean() {
                 entry.outcome = Outcome::Failed;
                 code = 1;

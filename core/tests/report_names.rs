@@ -66,3 +66,50 @@ fn report_name_keeps_absolute_and_cyrillic() {
     assert!(p.is_absolute());
     assert!(p.to_string_lossy().contains("ОПС"));
 }
+
+/// Если каталог программы недоступен для записи (Program Files), отчёты
+/// уходят в `Документы\RemontExplorer\reports`, а не срывают операцию.
+#[test]
+#[cfg(unix)]
+fn read_only_app_dir_falls_back_to_documents() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _g = env_lock();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var(remont_core::paths::DATA_DIR_ENV, tmp.path());
+    set_output_dir(None);
+
+    let ro = tmp.path().join("ro");
+    fs::create_dir_all(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let old = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&ro).unwrap();
+    let p = resolve_report_path("files_info_x.csv");
+    std::env::set_current_dir(&old).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        p.starts_with(tmp.path().join("reports")),
+        "отчёт не ушёл в резервную папку: {}",
+        p.display()
+    );
+    std::env::remove_var(remont_core::paths::DATA_DIR_ENV);
+}
+
+/// В обычном каталоге отчёты пишутся рядом с приложением (как раньше).
+#[test]
+#[cfg(unix)]
+fn writable_app_dir_is_used_by_default() {
+    let _g = env_lock();
+    let tmp = TempDir::new().unwrap();
+    set_output_dir(None);
+    let old = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+    let p = resolve_report_path("files_info_y.csv");
+    std::env::set_current_dir(&old).unwrap();
+    // На macOS /var — симлинк на /private/var: сравниваем канонические пути.
+    let base = tmp.path().canonicalize().unwrap();
+    let got = p.parent().unwrap().canonicalize().unwrap();
+    assert_eq!(got, base, "отчёт ушёл не в рабочий каталог: {}", p.display());
+}

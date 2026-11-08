@@ -16,11 +16,11 @@ pub enum Lang {
 static GLOBAL_LANG: OnceLock<Mutex<Lang>> = OnceLock::new();
 
 pub fn set_global(lang: Lang) {
-    *GLOBAL_LANG.get_or_init(|| Mutex::new(Lang::Ru)).lock().unwrap() = lang;
+    *GLOBAL_LANG.get_or_init(|| Mutex::new(Lang::Ru)).lock().unwrap_or_else(|e| e.into_inner()) = lang;
 }
 
 pub fn global() -> Lang {
-    *GLOBAL_LANG.get_or_init(|| Mutex::new(Lang::Ru)).lock().unwrap()
+    *GLOBAL_LANG.get_or_init(|| Mutex::new(Lang::Ru)).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Перевод по ключу (ключ — строковый литерал). Для неизвестного ключа —
