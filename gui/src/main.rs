@@ -1984,27 +1984,33 @@ impl App {
                 }
             });
 
-            ui.checkbox(&mut self.ui_config.open_result, &l_open_result);
-            ui.checkbox(&mut self.ui_config.notify, &l_notify);
-
-
-            ui.checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
-            ui.checkbox(&mut self.ui_config.check_space, &l_check_space);
-            // Обход 260 символов: префикс `\\?\` в наших вызовах, права не нужны.
-            if ui.checkbox(&mut self.ui_config.long_paths, &l_long_paths).changed() {
-                remont_core::set_long_paths(self.ui_config.long_paths);
-            }
-            ui.checkbox(&mut self.ui_config.check_updates, &l_check_updates);
-            // Автоустановка немыслима без автозагрузки — включаем её следом.
+            // Два столбца: слева — операции, справа — обновления. Одним
+            // списком блок занимал пол-окна, а справа оставалась пустота.
             let mut auto_install = self.ui_config.auto_install;
-            if ui.checkbox(&mut auto_install, &l_auto_install).changed() {
-                self.ui_config.auto_install = auto_install;
-                if auto_install {
-                    self.ui_config.auto_download = true;
+            ui.columns(2, |cols| {
+                cols[0].checkbox(&mut self.ui_config.open_result, &l_open_result);
+                cols[0].checkbox(&mut self.ui_config.notify, &l_notify);
+                cols[0].checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
+                cols[0].checkbox(&mut self.ui_config.check_space, &l_check_space);
+                // Обход 260 символов: префикс `\\?\` в наших вызовах, права не нужны.
+                if cols[0]
+                    .checkbox(&mut self.ui_config.long_paths, &l_long_paths)
+                    .changed()
+                {
+                    remont_core::set_long_paths(self.ui_config.long_paths);
                 }
-            }
-            ui.add_enabled_ui(!self.ui_config.auto_install, |ui| {
-                ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
+
+                cols[1].checkbox(&mut self.ui_config.check_updates, &l_check_updates);
+                // Автоустановка немыслима без автозагрузки — включаем её следом.
+                if cols[1].checkbox(&mut auto_install, &l_auto_install).changed() {
+                    self.ui_config.auto_install = auto_install;
+                    if auto_install {
+                        self.ui_config.auto_download = true;
+                    }
+                }
+                cols[1].add_enabled_ui(!self.ui_config.auto_install, |ui| {
+                    ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
+                });
             });
 
             if is_win {
@@ -2053,10 +2059,12 @@ impl App {
                 // Все три пункта — одинаковые флажки: без статус-точек и
                 // разных отступов (пользователь просил один тип).
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
-                ui.checkbox(&mut menu_on, &l_menu);
                 let mut auto_on = self.autostart.unwrap_or(false);
-                ui.checkbox(&mut auto_on, &l_auto);
-                ui.checkbox(&mut self.ui_config.close_to_tray, &l_tray);
+                ui.columns(2, |cols| {
+                    cols[0].checkbox(&mut menu_on, &l_menu);
+                    cols[1].checkbox(&mut auto_on, &l_auto);
+                    cols[0].checkbox(&mut self.ui_config.close_to_tray, &l_tray);
+                });
                 // Обработка изменений (после отрисовки статусов)
                 if menu_on != self.ctx_menu.unwrap_or(false) {
                     let exe = winshell::exe_path();
@@ -4990,12 +4998,13 @@ mod tests {
         let src = include_str!("main.rs");
         let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
         let start = code.find("let mut menu_on = self.ctx_menu").expect("нет блока Windows");
-        let block = &code[start..start + 500];
+        let block = &code[start..start + 700];
         assert!(!block.contains("●"), "осталась статус-точка у флажка");
         assert!(!block.contains("○"), "остался пустой индикатор у флажка");
-        assert!(block.contains("ui.checkbox(&mut menu_on, &l_menu)"));
-        assert!(block.contains("ui.checkbox(&mut auto_on, &l_auto)"));
-        assert!(block.contains("ui.checkbox(&mut self.ui_config.close_to_tray, &l_tray)"));
+        // Два столбца: флажки рисуются на колонках, но остаются обычными checkbox.
+        assert!(block.contains("checkbox(&mut menu_on, &l_menu)"));
+        assert!(block.contains("checkbox(&mut auto_on, &l_auto)"));
+        assert!(block.contains("checkbox(&mut self.ui_config.close_to_tray, &l_tray)"));
     }
 
     /// Папка открывается Проводником ("explore") и без префикса \\?\:
@@ -5463,6 +5472,29 @@ mod tests {
         assert!(cfg.long_paths);
         let back = serde_json::to_string(&cfg).unwrap();
         assert!(back.contains("long_paths"));
+    }
+
+
+    /// Чекбоксы настроек идут в два столбца, а рядом с системной поддержкой
+    /// длинных путей указано, что нужны права администратора.
+    #[test]
+    fn settings_use_two_columns_and_admin_note() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("fn settings_options").expect("нет настроек");
+        let block = &code[start..start + 9000];
+        assert!(
+            block.contains("ui.columns(2, |cols|"),
+            "чекбоксы не в два столбца"
+        );
+        assert!(
+            i18n::t(Lang::Ru, "ui.long_paths_sys").contains("нужны права администратора"),
+            "нет пометки про права администратора"
+        );
+        assert!(
+            i18n::t(Lang::En, "ui.long_paths_sys").contains("administrator rights"),
+            "нет пометки про права в английском"
+        );
     }
 
 }
