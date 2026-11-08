@@ -1693,27 +1693,8 @@ impl App {
 
         let mut browse = false;
         let mut reset = false;
-        // Акцентный цвет для заголовков секций
-        let accent = egui::Color32::from_rgb(33, 100, 220);
-        // Тонкий разделитель между секциями настроек.
-        let theme_style = |ui: &mut egui::Ui| {
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-        };
 
-        // Секция «Интерфейс»
         ui.group(|ui| {
-            theme_style(ui);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(self.t("ui.section_interface"))
-                        .strong()
-                        .size(14.0)
-                        .color(accent),
-                );
-            });
-            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(&l_theme);
                 ui.selectable_value(&mut self.ui_config.theme, ThemeMode::Light, &l_light);
@@ -1768,17 +1749,7 @@ impl App {
             ui.checkbox(&mut self.ui_config.check_updates, &l_check_updates);
 
             if is_win {
-                // Windows-настройки со статус-индикаторами
-                theme_style(ui);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Windows")
-                            .strong()
-                            .size(14.0)
-                            .color(accent),
-                    );
-                });
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 // Все три пункта — одинаковые флажки: без статус-точек и
                 // разных отступов (пользователь просил один тип).
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
@@ -2930,6 +2901,8 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             // Одна строка: вкладки слева, «О приложении» — в правом краю.
+            // Отступ сверху равен отступу снизу — строка стоит ровно.
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let tw = format!("  {}  ", self.t("tab.work"));
                 let ts = format!("  {}  ", self.t("tab.settings"));
@@ -4647,6 +4620,38 @@ mod tests {
         // Префикс снимается для обоих вариантов — локального и UNC.
         assert!(code.contains(r#"strip_prefix(r"\\?\UNC\")"#));
         assert!(code.contains(r#"strip_prefix(r"\\?\")"#));
+    }
+
+
+    /// В настройках нет заголовков секций и полос над ними — все опции
+    /// одним блоком (пользователь просил убрать «Интерфейс» и «Windows»).
+    #[test]
+    fn settings_have_no_section_headers() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("fn settings_options").expect("нет настроек");
+        let block = &code[start..start + 9000];
+        assert!(!block.contains("ui.section_interface"), "остался заголовок «Интерфейс»");
+        assert!(!block.contains(r#"RichText::new("Windows")"#), "остался заголовок «Windows»");
+        assert!(!block.contains("theme_style"), "остались полосы-разделители секций");
+    }
+
+    /// Строка вкладок стоит с одинаковым отступом сверху и снизу.
+    #[test]
+    fn tabs_row_has_symmetric_padding() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("TopBottomPanel::top(\"header\")").expect("нет шапки");
+        let header = &code[start..start + 400];
+        assert!(
+            header.contains("ui.add_space(6.0);\n            ui.horizontal"),
+            "нет отступа над строкой вкладок"
+        );
+        let end = code[start..].find("ui.separator()").unwrap_or(header.len());
+        assert!(
+            code[start..start + end.min(3000)].contains("ui.add_space(6.0);"),
+            "нет отступа под строкой вкладок"
+        );
     }
 
 }
