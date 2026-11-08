@@ -456,6 +456,9 @@ remont_explorer.exe --cli --history --export D:\history.csv
 ```
 
 Коды возврата: `0` — успех, `1` — операция с ошибками, `2` — неверные аргументы.
+
+Открыть приложение сразу на нужной вкладке (без консольного режима):
+`remont_explorer.exe --tab settings|schedule|history|help|work`.
 Полная справка: `remont_explorer.exe --help`.
 
 ## Сборка
