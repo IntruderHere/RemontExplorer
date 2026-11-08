@@ -248,7 +248,7 @@ fn open_url(url: &str) {
     }
     #[cfg(windows)]
     {
-        open_with_shell(Path::new(url));
+        open_with_shell(Path::new(url), false);
     }
     #[cfg(not(windows))]
     {
@@ -267,8 +267,11 @@ fn open_result_file(path: &Path) {
     {
         // Абсолютный путь — чтобы файл нашёлся при любом рабочем каталоге.
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        // `canonicalize` возвращает путь с префиксом `\\?\`, а оболочка
+        // Windows такие пути не открывает: папка журналов «не открывалась».
+        let abs = unverbatim(&abs);
         if abs.exists() {
-            open_with_shell(&abs);
+            open_with_shell(&abs, abs.is_dir());
         }
     }
     #[cfg(not(windows))]
@@ -279,9 +282,25 @@ fn open_result_file(path: &Path) {
     }
 }
 
-/// Открыть файл или ссылку средствами оболочки Windows (Unicode-безопасно).
+/// Убрать Windows-префикс длинных путей (`\\?\`, `\\?\UNC\`).
+///
+/// Оболочка (`ShellExecute`) и Проводник префикс не понимают — с ним не
+/// открывается ни файл, ни папка.
 #[cfg(windows)]
-fn open_with_shell(target: &Path) {
+fn unverbatim(p: &Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    p.to_path_buf()
+}
+
+/// Открыть файл, папку или ссылку средствами оболочки Windows (Unicode).
+#[cfg(windows)]
+fn open_with_shell(target: &Path, is_dir: bool) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -290,7 +309,8 @@ fn open_with_shell(target: &Path) {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    let op = wide(std::ffi::OsStr::new("open"));
+    // Для каталога — «explore» (Проводник), иначе — приложение по умолчанию.
+    let op = wide(std::ffi::OsStr::new(if is_dir { "explore" } else { "open" }));
     let file = wide(target.as_os_str());
     unsafe {
         ShellExecuteW(
@@ -1759,34 +1779,13 @@ impl App {
                     );
                 });
                 ui.add_space(6.0);
+                // Все три пункта — одинаковые флажки: без статус-точек и
+                // разных отступов (пользователь просил один тип).
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
-                let menu_status = if self.ctx_menu.is_none() {
-                    RichText::new("—").weak().color(egui::Color32::from_rgb(150, 150, 150))
-                } else if menu_on {
-                    RichText::new("● ").color(egui::Color32::from_rgb(40, 167, 69)).size(10.0)
-                } else {
-                    RichText::new("○ ").weak().color(egui::Color32::from_rgb(150, 150, 150))
-                };
-                ui.horizontal(|ui| {
-                    ui.label(menu_status);
-                    ui.add(egui::Checkbox::new(&mut menu_on, &l_menu));
-                });
+                ui.checkbox(&mut menu_on, &l_menu);
                 let mut auto_on = self.autostart.unwrap_or(false);
-                let auto_status = if self.autostart.is_none() {
-                    RichText::new("—").weak().color(egui::Color32::from_rgb(150, 150, 150))
-                } else if auto_on {
-                    RichText::new("● ").color(egui::Color32::from_rgb(40, 167, 69)).size(10.0)
-                } else {
-                    RichText::new("○ ").weak().color(egui::Color32::from_rgb(150, 150, 150))
-                };
-                ui.horizontal(|ui| {
-                    ui.label(auto_status);
-                    ui.add(egui::Checkbox::new(&mut auto_on, &l_auto));
-                });
-                ui.add(egui::Checkbox::new(
-                    &mut self.ui_config.close_to_tray,
-                    &l_tray,
-                ));
+                ui.checkbox(&mut auto_on, &l_auto);
+                ui.checkbox(&mut self.ui_config.close_to_tray, &l_tray);
                 // Обработка изменений (после отрисовки статусов)
                 if menu_on != self.ctx_menu.unwrap_or(false) {
                     let exe = winshell::exe_path();
@@ -4618,6 +4617,36 @@ mod tests {
         let block = &code[c..c + 400];
         assert!(block.contains("Stroke::NONE"), "у консоли остался контур");
         assert!(block.contains(".fill(console_bg)"), "нет мягкого фона консоли");
+    }
+
+
+    /// Все флажки в блоке Windows — одного вида: без цветных статус-точек
+    /// перед текстом (они сбивали выравнивание).
+    #[test]
+    fn windows_checkboxes_are_uniform() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("let mut menu_on = self.ctx_menu").expect("нет блока Windows");
+        let block = &code[start..start + 500];
+        assert!(!block.contains("●"), "осталась статус-точка у флажка");
+        assert!(!block.contains("○"), "остался пустой индикатор у флажка");
+        assert!(block.contains("ui.checkbox(&mut menu_on, &l_menu)"));
+        assert!(block.contains("ui.checkbox(&mut auto_on, &l_auto)"));
+        assert!(block.contains("ui.checkbox(&mut self.ui_config.close_to_tray, &l_tray)"));
+    }
+
+    /// Папка открывается Проводником ("explore") и без префикса \\?\:
+    /// с префиксом оболочка Windows путь не открывает.
+    #[test]
+    fn folders_open_via_explorer_without_verbatim_prefix() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("fn unverbatim"));
+        assert!(code.contains("open_with_shell(&abs, abs.is_dir())"));
+        assert!(code.contains(r#"if is_dir { "explore" } else { "open" }"#));
+        // Префикс снимается для обоих вариантов — локального и UNC.
+        assert!(code.contains(r#"strip_prefix(r"\\?\UNC\")"#));
+        assert!(code.contains(r#"strip_prefix(r"\\?\")"#));
     }
 
 }
