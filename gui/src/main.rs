@@ -2923,14 +2923,21 @@ impl eframe::App for App {
                     ui.label(RichText::new(ths).weak());
                     ui.label(RichText::new(th).weak());
                 } else {
-                    // Активная вкладка подсвечивается акцентным цветом
-                    let accent = egui::Color32::from_rgb(33, 100, 220);
+                    // Активная вкладка — только мягкий фон: без маркера слева
+                    // и без цветного текста (синий текст читается странно).
                     let mut draw = |ui: &mut egui::Ui, key: &str, label: String| {
-                        if Some(key) == active {
-                            ui.label(
-                                RichText::new(format!("▎ {}", label))
-                                    .strong()
-                                    .color(accent),
+                        let selected = Some(key) == active;
+                        if selected {
+                            let bg = if ui.visuals().dark_mode {
+                                egui::Color32::from_rgb(58, 62, 70)
+                            } else {
+                                egui::Color32::from_rgb(226, 232, 240)
+                            };
+                            ui.add(
+                                egui::Button::new(RichText::new(label))
+                                    .fill(bg)
+                                    .stroke(egui::Stroke::NONE)
+                                    .rounding(egui::Rounding::same(4.0)),
                             );
                         } else {
                             ui.selectable_value(&mut self.top_tab, match key {
@@ -4498,6 +4505,21 @@ mod tests {
         );
         // Вне Windows вызов — заглушка (компилируется и ничего не делает).
         attach_parent_console();
+    }
+
+
+    /// Активная вкладка выделяется только фоном: без маркера «▎» и без
+    /// синего текста (пользователь просил убрать оба признака).
+    #[test]
+    fn active_tab_is_background_only() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(!code.contains('\u{258E}'), "маркер активной вкладки остался");
+        let start = code.find("let mut draw = |ui: &mut egui::Ui").expect("нет отрисовки вкладок");
+        let block = &code[start..start + 900];
+        assert!(!block.contains(".color(accent)"), "текст активной вкладки всё ещё цветной");
+        assert!(block.contains(".fill(bg)"), "нет выделения фоном");
+        assert!(block.contains("Stroke::NONE"), "у выделения не убран контур");
     }
 
 }
