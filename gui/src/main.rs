@@ -1820,9 +1820,6 @@ impl App {
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
-        // Небольшой отступ от строки вкладок: блок настроек читается как
-        // отдельная область, а не «прилипший» к шапке.
-        ui.add_space(10.0);
         let ui_before = self.ui_config.clone();
         self.settings_options(ui);
         // Сохраняем только при изменении + сразу применяем все настройки.
@@ -1867,6 +1864,9 @@ impl App {
                 self.editor_single = load_text_file(config_path(def.config));
             }
         }
+        // Отступ отделяет раздел «Выберите режим для настройки» от общих
+        // настроек выше — именно его просили визуально отделить.
+        ui.add_space(12.0);
         let full_w = ui.available_width();
         let avail_h = ui.available_height();
         ui.horizontal(|ui| {
@@ -4676,11 +4676,20 @@ mod tests {
         let line = &block[title..title + 140];
         assert!(!line.contains(".color("), "заголовок истории всё ещё цветной");
 
-        // 2) Блок настроек отделён от шапки отступом.
+        // 2) Отделён именно нижний раздел, а не верхние настройки.
         let s = code.find("fn settings_tab").expect("нет настроек");
+        let head = &code[s..s + 200];
         assert!(
-            code[s..s + 300].contains("ui.add_space(10.0)"),
-            "у настроек нет отступа сверху"
+            !head.contains("ui.add_space(10.0)"),
+            "отступ снова отрывает верхние настройки от меню"
+        );
+        let tab = &code[s..s + 3000];
+        let lower = tab
+            .find("ui.add_space(12.0)")
+            .expect("нет отступа перед разделом режимов");
+        assert!(
+            tab[lower..lower + 200].contains("ui.horizontal"),
+            "отступ стоит не перед разделом «Выберите режим»"
         );
 
         // 3) Описание в справке прокручивается.
