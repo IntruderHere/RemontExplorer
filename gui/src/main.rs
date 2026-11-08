@@ -4726,4 +4726,70 @@ mod tests {
         assert_eq!(app.help_sel, 2);
     }
 
+
+    /// В справке есть отдельный раздел про CLI — с описанием каждого режима
+    /// и примерами команд, на обоих языках.
+    #[test]
+    fn cli_help_section_exists() {
+        let ru = i18n::help(Lang::Ru);
+        let en = i18n::help(Lang::En);
+        assert_eq!(ru.len(), en.len(), "разделов справки разное количество");
+        let last = ru.last().expect("справка пуста");
+        assert_eq!(last.title, "CLI-режим");
+        assert_eq!(en.last().unwrap().title, "CLI mode");
+
+        // Перечислены все режимы и ключевые параметры.
+        for needle in [
+            "--cli",
+            "--scan",
+            "--compare",
+            "--duplicates",
+            "--delete",
+            "--copy",
+            "--cleanup",
+            "--create",
+            "--diff",
+            "--history",
+            "--quiet",
+            "--recycle",
+            "--archive",
+            "--verify",
+            "--format",
+            "--out",
+        ] {
+            assert!(last.purpose.contains(needle) || last.details.contains(needle) || last.cfg_format.contains(needle),
+                "в разделе CLI нет упоминания {needle}");
+        }
+        // Есть примеры и коды возврата.
+        assert!(last.example.contains("--cli --scan"));
+        assert!(last.cfg_format.contains("0"));
+        // Английская версия без кириллицы.
+        assert!(!en.last().unwrap().details.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)));
+    }
+
+    /// Раздел CLI рисуется и прокручивается в небольшом окне.
+    #[test]
+    fn cli_help_renders() {
+        let _d = test_data_dir();
+        let mut app = App {
+            top_tab: TopTab::Help,
+            help_sel: i18n::help(Lang::Ru).len() - 1,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.help_tab(ui));
+            });
+        }
+        assert_eq!(app.help_sel, i18n::help(Lang::Ru).len() - 1);
+    }
+
 }

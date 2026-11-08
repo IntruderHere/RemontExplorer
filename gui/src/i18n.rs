@@ -477,7 +477,7 @@ pub fn help(lang: Lang) -> &'static [HelpText] {
     }
 }
 
-static HELP_RU: [HelpText; 9] = [
+static HELP_RU: [HelpText; 10] = [
     HelpText {
         title: "Удаление",
         config: "Документы/RemontExplorer/config/folders_to_delete.txt",
@@ -559,9 +559,18 @@ static HELP_RU: [HelpText; 9] = [
         example: "Записи появляются сами — заполнять ничего не нужно.\nПример строки журнала:\n{\"when\":\"2026-11-08T10:15:00+03:00\",\"mode\":\"scan\",\"title\":\"Сканирование\",\"ok\":1284,\"outcome\":\"ok\"}",
         result_example: "Вкладка «История»:\n08.11.2026 10:15  Сканирование  D:\\ОПС 12  успешно  12.4  📂\n08.11.2026 11:02  Копирование   from_to.csv    успешно  342.1  —\n08.11.2026 11:40  Удаление      D:\\Временное  с ошибками  3.0  📂",
     },
+    HelpText {
+        title: "CLI-режим",
+        purpose: "Запуск любой функции приложения без окна — из bat-файла, PowerShell, Планировщика заданий Windows или другого скрипта. Интерфейс не открывается, в консоль родительского процесса печатается журнал; при --quiet — только итог.",
+        config: "remont_explorer.exe --cli <режим> [параметры]\nПолная справка: remont_explorer.exe --help",
+        cfg_format: "Первый параметр — --cli (обязателен, иначе запустится окно). Дальше один режим и его параметры.\nКоды возврата: 0 — успех, 1 — операция завершилась с ошибками, 2 — неверные аргументы.\nКаждая операция записывается в историю с источником cli; отчёт кладётся в --out (если не указан — в папку результатов из настроек).",
+        details: "Режимы:\n--scan \"папка\" — сканирование в отчёт; параметры: --out \"папка\" (куда положить отчёт), --format csv|xlsx, --threads N (число потоков).\n--compare \"файл\" — сравнение пар папок из файла настроек сравнения.\n--duplicates \"файл\" — поиск дубликатов по списку папок (SHA-256).\n--delete \"файл\" — удаление путей из списка; --recycle (в корзину), --archive (сначала ZIP-архив).\n--copy \"файл\" — копирование по парам откуда;куда; --verify (сверка SHA-256), --no-space-check (не проверять свободное место).\n--cleanup \"папка\" — удаление пустых папок.\n--create \"файл\" — создание папок из списка; --zip — сразу упаковать в архив.\n--diff \"старый\" \"новый\" — сравнение двух отчётов сканирования (CSV или XLSX).\n--history — показать историю; --export \"файл.csv\" — выгрузить в CSV; --clear — очистить.\n--quiet — только итог, без подробного журнала.\nПути с пробелами и кириллицей берите в двойные кавычки.",
+        example: ":: сканирование папки в XLSX\nremont_explorer.exe --cli --scan \"D:\\ОПС 12\" --out \"D:\\Отчёты\" --format xlsx\n\n:: копирование со сверкой\nremont_explorer.exe --cli --copy \"D:\\config\\from_to.csv\" --verify\n\n:: удаление в корзину\nremont_explorer.exe --cli --delete \"D:\\config\\folders_to_delete.txt\" --recycle\n\n:: сравнение двух отчётов\nremont_explorer.exe --cli --diff \"D:\\Отчёты\\old.xlsx\" \"D:\\Отчёты\\new.xlsx\" --out \"D:\\Отчёты\"\n\n:: выгрузка истории\nremont_explorer.exe --cli --history --export \"D:\\Отчёты\\history.csv\"",
+        result_example: "Обычный вывод:\n[START] Сканирование: D:\\ОПС 12\n[DONE] Готово. Файлов: 1284. Отчет: D:\\Отчёты\\files_info_ОПС 12_20261108_101500.xlsx\n\nС --quiet печатается только путь к отчёту:\nD:\\Отчёты\\files_info_ОПС 12_20261108_101500.xlsx\n\nПроверка кода возврата в bat:\nremont_explorer.exe --cli --scan \"D:\\ОПС 12\" --quiet\nif errorlevel 1 echo Сканирование завершилось с ошибками",
+    },
 ];
 
-static HELP_EN: [HelpText; 9] = [
+static HELP_EN: [HelpText; 10] = [
     HelpText {
         title: "Delete",
         config: "<Documents>/RemontExplorer/config/folders_to_delete.txt",
@@ -642,5 +651,14 @@ static HELP_EN: [HelpText; 9] = [
         details: "Newest records are on top. Refresh re-reads the log, Open logs folder opens the directory in Explorer, Export to CSV saves the history for Excel (UTF-8 with BOM, semicolon separator), Clear history deletes the records. The folder icon opens the result file of that operation.",
         example: "Records appear by themselves - nothing to fill in.\nA sample log line:\n{\"when\":\"2026-11-08T10:15:00+03:00\",\"mode\":\"scan\",\"title\":\"Scan\",\"ok\":1284,\"outcome\":\"ok\"}",
         result_example: "History tab:\n11/08/2026 10:15  Scan      D:\\OPS 12    ok       12.4  (open)\n11/08/2026 11:02  Copy      from_to.csv ok      342.1  -\n11/08/2026 11:40  Delete    D:\\Temp     failed    3.0  (open)",
+    },
+    HelpText {
+        title: "CLI mode",
+        purpose: "Run any function without the window - from a bat file, PowerShell, Windows Task Scheduler or another script. The UI does not start; the log is printed to the parent console, and with --quiet only the result line.",
+        config: "remont_explorer.exe --cli <mode> [options]\nFull help: remont_explorer.exe --help",
+        cfg_format: "The first option is --cli (required, otherwise the window starts). Then one mode and its options.\nExit codes: 0 - success, 1 - finished with errors, 2 - invalid arguments.\nEvery run is written to history with source cli; the report goes to --out (or to the results folder from settings).",
+        details: "Modes:\n--scan \"folder\" - scan into a report; options: --out \"folder\", --format csv|xlsx, --threads N.\n--compare \"file\" - compare folder pairs from the compare settings file.\n--duplicates \"file\" - find duplicates across the folders listed in the file (SHA-256).\n--delete \"file\" - delete the listed paths; --recycle (Recycle Bin), --archive (ZIP first).\n--copy \"file\" - copy from;to pairs; --verify (SHA-256 check), --no-space-check.\n--cleanup \"folder\" - remove empty folders.\n--create \"file\" - create folders from the list; --zip - pack them into an archive.\n--diff \"old\" \"new\" - compare two scan reports (CSV or XLSX).\n--history - show history; --export \"file.csv\" - export to CSV; --clear - wipe it.\n--quiet - only the result line.\nQuote paths containing spaces.",
+        example: ":: scan a folder into XLSX\nremont_explorer.exe --cli --scan \"D:\\Site 12\" --out \"D:\\Reports\" --format xlsx\n\n:: copy with verification\nremont_explorer.exe --cli --copy \"D:\\config\\from_to.csv\" --verify\n\n:: delete to Recycle Bin\nremont_explorer.exe --cli --delete \"D:\\config\\folders_to_delete.txt\" --recycle\n\n:: compare two reports\nremont_explorer.exe --cli --diff \"D:\\Reports\\old.xlsx\" \"D:\\Reports\\new.xlsx\" --out \"D:\\Reports\"\n\n:: export history\nremont_explorer.exe --cli --history --export \"D:\\Reports\\history.csv\"",
+        result_example: "Normal output:\n[START] Scanning: D:\\Site 12\n[DONE] Done. Files: 1284. Report: D:\\Reports\\files_info_Site 12_20261108_101500.xlsx\n\nWith --quiet only the report path is printed:\nD:\\Reports\\files_info_Site 12_20261108_101500.xlsx\n\nChecking the exit code in a bat file:\nremont_explorer.exe --cli --scan \"D:\\Site 12\" --quiet\nif errorlevel 1 echo Scan finished with errors",
     },
 ];
