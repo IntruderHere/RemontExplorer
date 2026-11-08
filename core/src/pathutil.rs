@@ -6,10 +6,28 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::stop::StopToken;
 use crate::{LogSink};
 use crate::em;
+
+/// Использовать ли префикс `\\?\` (обход лимита 260 символов).
+///
+/// По умолчанию включено: префикс не требует прав администратора и действует
+/// только на наше приложение. Выключается в настройках — для старых сетевых
+/// хранилищ, которые не понимают такой вид пути.
+static LONG_PATHS: AtomicBool = AtomicBool::new(true);
+
+/// Включить/выключить обход длинных путей в текущем процессе.
+pub fn set_long_paths(on: bool) {
+    LONG_PATHS.store(on, Ordering::Relaxed);
+}
+
+/// Включён ли обход длинных путей.
+pub fn long_paths_enabled() -> bool {
+    LONG_PATHS.load(Ordering::Relaxed)
+}
 
 /// Преобразует путь для поддержки длинных имён (>260) на Windows.
 /// - `C:\...` -> `\\?\C:\...`
@@ -17,6 +35,9 @@ use crate::em;
 /// На других ОС — no-op.
 #[cfg(windows)]
 pub fn normalize_long_path(p: &Path) -> PathBuf {
+    if !long_paths_enabled() {
+        return p.to_path_buf();
+    }
     let s = p.to_string_lossy().into_owned();
     if s.starts_with(r"\\?\") {
         return PathBuf::from(s);
@@ -161,4 +182,35 @@ pub fn sweep_empty_parents(deleted: &[PathBuf], stop: &StopToken, log: &LogSink)
         }
     }
     count
+}
+
+#[cfg(test)]
+mod long_path_tests {
+    use super::*;
+
+    /// Флаг выключает префикс `\\?\`, по умолчанию он включён.
+    #[test]
+    fn long_paths_flag_toggles_prefix() {
+        let was = long_paths_enabled();
+        set_long_paths(true);
+        let p = Path::new("C:/temp/file.txt");
+        let on = normalize_long_path(p);
+        set_long_paths(false);
+        let off = normalize_long_path(p);
+        set_long_paths(was);
+
+        #[cfg(windows)]
+        {
+            assert!(
+                on.to_string_lossy().starts_with(r"\\?\"),
+                "префикс не добавлен: {on:?}"
+            );
+            assert_eq!(off, p.to_path_buf(), "флаг не отключил префикс");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(on, p.to_path_buf());
+            assert_eq!(off, p.to_path_buf());
+        }
+    }
 }

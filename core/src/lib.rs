@@ -304,3 +304,5 @@ pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+pub use pathutil::{long_paths_enabled, set_long_paths};

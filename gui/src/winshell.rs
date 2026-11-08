@@ -221,3 +221,77 @@ mod tests {
         assert!(!autostart_installed());
     }
 }
+
+/// Включена ли системная поддержка длинных путей (Windows 10 1607+).
+///
+/// `None` — ключа нет или система не Windows: значит поддержка выключена.
+/// Чтение `HKLM` не требует прав администратора.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn long_paths_system() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        let key = r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem";
+        let out = reg(&["query", key, "/v", "LongPathsEnabled"]).ok()?;
+        // Вывод: "    LongPathsEnabled    REG_DWORD    0x1"
+        let value = out
+            .lines()
+            .find(|l| l.contains("LongPathsEnabled"))
+            .and_then(|l| l.split_whitespace().last())?;
+        let v = value.trim();
+        let on = v.eq_ignore_ascii_case("0x1") || v == "1";
+        Some(on)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Включить системную поддержку длинных путей.
+///
+/// Меняется ключ `HKLM`, поэтому Windows показывает запрос UAC: без
+/// подтверждения администратора запись невозможна. Пользователь может
+/// отказаться — тогда возвращается ошибка, приложение продолжает работать
+/// со своим префиксом `\\?\`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn long_paths_enable() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let file = wide("reg.exe");
+        let params = wide(
+            r#"add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f"#,
+        );
+        let verb = wide("runas");
+        // SAFETY: строки живут до конца вызова, окна нет.
+        let rc = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                params.as_ptr(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        } as isize;
+        // ShellExecuteW возвращает значение > 32 при успехе.
+        if rc > 32 {
+            Ok(())
+        } else {
+            Err(format!("запрос прав отклонён (код {rc})"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("только для Windows".into())
+    }
+}

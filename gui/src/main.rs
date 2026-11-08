@@ -84,6 +84,10 @@ struct UiConfig {
     /// Проверять свободное место перед копированием.
     #[serde(default = "default_true")]
     check_space: bool,
+    /// Обходить ограничение длины пути 260 символов (префикс `\\?\`).
+    /// Не требует прав администратора.
+    #[serde(default = "default_true")]
+    long_paths: bool,
 }
 
 impl Default for UiConfig {
@@ -102,6 +106,7 @@ impl Default for UiConfig {
             delete_mode: remont_core::DeleteMode::Permanent,
             verify_copy: false,
             check_space: true,
+            long_paths: true,
         }
     }
 }
@@ -111,7 +116,13 @@ fn default_true() -> bool {
 }
 
 fn load_ui_config() -> UiConfig {
-    fs::read_to_string(config_path("ui.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    let cfg: UiConfig = fs::read_to_string(config_path("ui.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    // Настройка действует на весь процесс: применяем до первой операции.
+    remont_core::set_long_paths(cfg.long_paths);
+    cfg
 }
 
 fn save_ui_config(cfg: &UiConfig) {
@@ -625,6 +636,8 @@ struct App {
     update_exe: Option<PathBuf>,
     /// Ошибка загрузки/установки обновления.
     update_download_error: Option<String>,
+    /// Сообщение о включении системной поддержки длинных путей.
+    long_paths_msg: Option<String>,
     /// Канал фоновой загрузки.
     update_dl_rx: Option<mpsc::Receiver<DlMsg>>,
     /// Обновление готово, но ждёт окончания текущей операции.
@@ -686,6 +699,7 @@ impl Default for App {
             update_progress: None,
             update_exe: None,
             update_download_error: None,
+            long_paths_msg: None,
             update_dl_rx: None,
             install_after_op: false,
             hwnd: std::sync::Arc::new(AtomicIsize::new(0)),
@@ -1926,6 +1940,7 @@ impl App {
         let l_delete_mode = self.t("ui.delete_mode").to_string();
         let l_verify_copy = self.t("ui.verify_copy").to_string();
         let l_check_space = self.t("ui.check_space").to_string();
+        let l_long_paths = self.t("ui.long_paths").to_string();
         let l_menu = self.tf("win.ctx_menu", &[winshell::menu_caption(self.ui_config.lang == Lang::Ru).to_string()]);
         let l_auto = self.t("win.autostart").to_string();
         let l_tray = self.t("win.tray").to_string();
@@ -1975,6 +1990,10 @@ impl App {
 
             ui.checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
             ui.checkbox(&mut self.ui_config.check_space, &l_check_space);
+            // Обход 260 символов: префикс `\\?\` в наших вызовах, права не нужны.
+            if ui.checkbox(&mut self.ui_config.long_paths, &l_long_paths).changed() {
+                remont_core::set_long_paths(self.ui_config.long_paths);
+            }
             ui.checkbox(&mut self.ui_config.check_updates, &l_check_updates);
             // Автоустановка немыслима без автозагрузки — включаем её следом.
             let mut auto_install = self.ui_config.auto_install;
@@ -1987,6 +2006,34 @@ impl App {
             ui.add_enabled_ui(!self.ui_config.auto_install, |ui| {
                 ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
             });
+
+            if is_win {
+                // Системная поддержка длинных путей (HKLM) — отдельно от нашей:
+                // включает её только администратор, поэтому кнопка с UAC.
+                let sys = winshell::long_paths_system();
+                ui.horizontal_wrapped(|ui| {
+                    let state = if sys == Some(true) {
+                        self.t("ui.long_paths_on").to_string()
+                    } else {
+                        self.t("ui.long_paths_off").to_string()
+                    };
+                    ui.label(self.tf("ui.long_paths_sys", &[state]));
+                    if sys != Some(true) && ui.button(self.t("ui.long_paths_enable")).clicked() {
+                        match winshell::long_paths_enable() {
+                            Ok(()) => {
+                                self.long_paths_msg =
+                                    Some(self.t("ui.long_paths_asked").to_string());
+                            }
+                            Err(e) => {
+                                self.long_paths_msg = Some(self.tf("ui.long_paths_failed", &[e]));
+                            }
+                        }
+                    }
+                });
+                if let Some(msg) = self.long_paths_msg.clone() {
+                    ui.label(egui::RichText::new(msg).small());
+                }
+            }
 
             // Способ удаления: безвозвратно / корзина / архив.
             ui.horizontal(|ui| {
@@ -5405,6 +5452,17 @@ mod tests {
         assert!(dir_writable(&dir));
         assert!(!dir_writable(&dir.join("нет-такого-каталога")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    /// Старый `ui.json` без поля `long_paths` читается как «включено»:
+    /// обход длинных путей не должен отключаться сам после обновления.
+    #[test]
+    fn long_paths_defaults_on_for_old_config() {
+        let cfg: UiConfig = serde_json::from_str(r#"{"theme":"system","lang":"ru"}"#).unwrap();
+        assert!(cfg.long_paths);
+        let back = serde_json::to_string(&cfg).unwrap();
+        assert!(back.contains("long_paths"));
     }
 
 }
