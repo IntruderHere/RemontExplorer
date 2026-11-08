@@ -943,20 +943,16 @@ impl App {
                             });
                             // Путь к запущенному файлу: при нескольких копиях
                             // приложения сразу видно, какая именно работает.
-                            if let Ok(here) = std::env::current_exe() {
-                                ui.add_space(4.0);
-                                centered_row(ui, |ui| {
-                                    ui.label(RichText::new(here.display().to_string()).small().weak());
-                                });
-                            }
-                            // Журнал замены файла: по нему видно, на каком шаге
-                            // установка сорвалась, если обновление не встало.
+                            // Путь к запущенному файлу и журнал обновления — одной
+                            // строкой: видно, какая копия работает, и где искать следы.
                             ui.add_space(2.0);
                             centered_row(ui, |ui| {
-                                if ui
-                                    .small_button(self.t("upd.open_log"))
-                                    .clicked()
-                                {
+                                if let Ok(here) = std::env::current_exe() {
+                                    ui.label(
+                                        RichText::new(here.display().to_string()).small().weak(),
+                                    );
+                                }
+                                if ui.small_button(self.t("upd.open_log")).clicked() {
                                     let log = selfupdate::staging_dir().join("update.log");
                                     if log.exists() {
                                         open_result_file(&log);
@@ -967,7 +963,31 @@ impl App {
                             });
                             ui.add_space(12.0);
                             ui.add(egui::Label::new(self.t("about.desc")).wrap());
-                            ui.add_space(10.0);
+                            // История проекта: короткий блок с прокруткой, чтобы
+                            // окно не растягивалось на весь экран.
+                            egui::ScrollArea::vertical()
+                                .id_salt("about_history")
+                                .max_height(40.0)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(self.t("about.history")).small(),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(self.t("about.contacts")).small().weak());
+                                ui.hyperlink_to(
+                                    RichText::new(self.t("about.tg")).small(),
+                                    "https://t.me/ivanevseev1",
+                                );
+                                ui.hyperlink_to(
+                                    RichText::new(self.t("about.gh")).small(),
+                                    "https://github.com/IntruderHere",
+                                );
+                            });
+                            ui.add_space(8.0);
                             ui.label(RichText::new(self.t("about.author")).strong());
                             ui.add_space(10.0);
 
@@ -5583,6 +5603,34 @@ mod tests {
         assert!(en.contains("latest version") && en.contains("{}"));
         let msg = tfg("upd.latest", &["2.4".to_string()]);
         assert_eq!(msg, "Установлена последняя версия (2.4)");
+    }
+
+
+    /// В «О приложении» есть история проекта и контакты разработчика.
+    /// Раньше они были только в README — пользователь справедливо спросил.
+    #[test]
+    fn about_window_shows_history_and_contacts() {
+        let ru = i18n::t(Lang::Ru, "about.history");
+        assert!(ru.contains("DirLister"), "нет упоминания DirLister");
+        assert!(ru.contains("Python"), "нет Python");
+        assert!(ru.contains("Rust"), "нет Rust");
+        assert!(ru.contains("Qwen 3.6 35B A3B"), "нет модели Qwen");
+        assert!(ru.contains("Deepseek V 4.1 Flash 1017"), "нет модели Deepseek");
+        assert!(ru.contains("Почта России"), "нет Почты России");
+
+        let en = i18n::t(Lang::En, "about.history");
+        assert!(en.contains("DirLister") && en.contains("Rust"));
+
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains(r#"t("about.history")"#), "история не выводится в окне");
+        assert!(code.contains("https://t.me/ivanevseev1"), "нет ссылки на Telegram");
+        assert!(
+            code.contains("https://github.com/IntruderHere"),
+            "нет ссылки на GitHub"
+        );
+        assert!(code.contains(r#"t("about.tg")"#));
+        assert!(code.contains(r#"t("about.gh")"#));
     }
 
 }
