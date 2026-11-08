@@ -330,7 +330,69 @@ fn ensure_config_file(path: &Path) {
     let _ = fs::write(path, "");
 }
 
-/// Настройка темы egui по выбору пользователя.
+/// Визуальное оформление: цвета, отступы, скругления.
+///
+/// Вынесено из `update`, чтобы цвета можно было проверить тестом: цвет
+/// обычного текста здесь нейтральный — акцентный синий делал синими вкладки,
+/// кнопки и консоль.
+fn tune_style(style: &mut egui::Style) {
+    let visuals = &mut style.visuals;
+            // Акцентный цвет — профессиональный синий
+            // Мягкие тени и скругления
+            visuals.panel_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(28, 30, 35)
+            } else {
+                egui::Color32::from_rgb(245, 247, 250)
+            };
+            visuals.indent_has_left_vline = true;
+            // Кнопки и интерактивные элементы
+            visuals.widgets.active.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(50, 55, 65)
+            } else {
+                egui::Color32::from_rgb(220, 228, 240)
+            };
+            visuals.widgets.hovered.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(42, 48, 58)
+            } else {
+                egui::Color32::from_rgb(232, 238, 248)
+            };
+            visuals.widgets.inactive.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(38, 40, 46)
+            } else {
+                egui::Color32::from_rgb(248, 249, 251)
+            };
+            // Обычный текст — нейтральный: акцентный синий здесь делал синими
+            // вкладки, кнопки и всю консоль.
+            visuals.widgets.inactive.fg_stroke.color = if visuals.dark_mode {
+                egui::Color32::from_rgb(200, 205, 215)
+            } else {
+                egui::Color32::from_rgb(45, 50, 60)
+            };
+            visuals.widgets.noninteractive.fg_stroke.color = if visuals.dark_mode {
+                egui::Color32::from_rgb(200, 205, 215)
+            } else {
+                egui::Color32::from_rgb(60, 66, 78)
+            };
+            // Текст выбранного пункта — на фоне выделения, без цветного
+            // оттенка (в тёмной теме синий на синем не читался).
+            visuals.selection.stroke = if visuals.dark_mode {
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(240, 243, 248))
+            } else {
+                egui::Stroke::new(1.0_f32, egui::Color32::WHITE)
+            };
+            // Группы (границы)
+            visuals.widgets.open.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(35, 37, 43)
+            } else {
+                egui::Color32::from_rgb(250, 251, 253)
+            };
+            visuals.extreme_bg_color = if visuals.dark_mode {
+                egui::Color32::from_rgb(20, 22, 27)
+            } else {
+                egui::Color32::from_rgb(238, 242, 248)
+            };
+}
+
 fn theme_preference(mode: ThemeMode) -> egui::ThemePreference {
     match mode {
         ThemeMode::Light => egui::ThemePreference::Light,
@@ -1218,7 +1280,17 @@ impl App {
         }
         ui.add_space(2.0);
 
-        ui.group(|ui| {
+        let console_bg = if ui.visuals().dark_mode {
+            egui::Color32::from_rgb(34, 36, 42)
+        } else {
+            egui::Color32::from_rgb(248, 249, 252)
+        };
+        egui::Frame::default()
+            .fill(console_bg)
+            .stroke(egui::Stroke::NONE)
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
             ui.set_height(ui.available_height().max(100.0));
             if let Some(w) = &self.startup_warning {
                 ui.add(
@@ -2853,50 +2925,7 @@ impl eframe::App for App {
         // ---------- Кастомная визуальная тема ----------
         {
             let mut style = (*ctx.style()).clone();
-            let visuals = &mut style.visuals;
-            // Акцентный цвет — профессиональный синий
-            let accent = egui::Color32::from_rgb(33, 100, 220);
-            // Мягкие тени и скругления
-            visuals.panel_fill = if visuals.dark_mode {
-                egui::Color32::from_rgb(28, 30, 35)
-            } else {
-                egui::Color32::from_rgb(245, 247, 250)
-            };
-            visuals.indent_has_left_vline = true;
-            // Кнопки и интерактивные элементы
-            visuals.widgets.active.bg_fill = if visuals.dark_mode {
-                egui::Color32::from_rgb(50, 55, 65)
-            } else {
-                egui::Color32::from_rgb(220, 228, 240)
-            };
-            visuals.widgets.hovered.bg_fill = if visuals.dark_mode {
-                egui::Color32::from_rgb(42, 48, 58)
-            } else {
-                egui::Color32::from_rgb(232, 238, 248)
-            };
-            visuals.widgets.inactive.bg_fill = if visuals.dark_mode {
-                egui::Color32::from_rgb(38, 40, 46)
-            } else {
-                egui::Color32::from_rgb(248, 249, 251)
-            };
-            visuals.widgets.inactive.fg_stroke.color = if visuals.dark_mode {
-                egui::Color32::from_rgb(200, 205, 215)
-            } else {
-                accent
-            };
-            // Группы (границы)
-            visuals.widgets.open.bg_fill = if visuals.dark_mode {
-                egui::Color32::from_rgb(35, 37, 43)
-            } else {
-                egui::Color32::from_rgb(250, 251, 253)
-            };
-            visuals.extreme_bg_color = if visuals.dark_mode {
-                egui::Color32::from_rgb(20, 22, 27)
-            } else {
-                egui::Color32::from_rgb(238, 242, 248)
-            };
-            // Без этого кастомные цвета оставались объявленными, но не
-            // применялись: стиль копировался и нигде не сохранялся.
+            tune_style(&mut style);
             ctx.set_style(style);
         }
 
@@ -2973,7 +3002,7 @@ impl eframe::App for App {
                     }
                 });
             });
-            ui.separator();
+            ui.add_space(6.0);
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -4520,6 +4549,75 @@ mod tests {
         assert!(!block.contains(".color(accent)"), "текст активной вкладки всё ещё цветной");
         assert!(block.contains(".fill(bg)"), "нет выделения фоном");
         assert!(block.contains("Stroke::NONE"), "у выделения не убран контур");
+    }
+
+
+    /// Обычный текст интерфейса не окрашивается акцентом: иначе синими
+    /// становятся все вкладки, кнопки и консоль.
+    #[test]
+    fn body_text_is_not_accent_blue() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code
+            .find("widgets.inactive.fg_stroke.color")
+            .expect("не задан цвет обычного текста");
+        let block = &code[start..start + 320];
+        assert!(
+            !block.contains("accent"),
+            "цвет обычного текста снова акцентный (синий)"
+        );
+        // Нейтральные цвета заданы явно для обеих тем.
+        assert!(block.contains("Color32::from_rgb(45, 50, 60)"));
+        assert!(block.contains("Color32::from_rgb(200, 205, 215)"));
+    }
+
+
+    /// Стиль проверяется функционально: цвет обычного текста в обеих темах
+    /// не акцентный, панели и фон заданы, выделение читаемое.
+    #[test]
+    fn tuned_style_has_neutral_text() {
+        let accent = egui::Color32::from_rgb(33, 100, 220);
+
+        let mut light = egui::Style::default();
+        light.visuals.dark_mode = false;
+        tune_style(&mut light);
+        assert_ne!(
+            light.visuals.widgets.inactive.fg_stroke.color, accent,
+            "текст вкладок и кнопок снова синий"
+        );
+        assert_ne!(light.visuals.widgets.noninteractive.fg_stroke.color, accent);
+
+        let mut dark = egui::Style::default();
+        dark.visuals.dark_mode = true;
+        tune_style(&mut dark);
+        assert_ne!(dark.visuals.widgets.inactive.fg_stroke.color, accent);
+
+        // Текст обычных кнопок заметно темнее акцента в светлой теме.
+        let c = light.visuals.widgets.inactive.fg_stroke.color;
+        assert!(
+            (c.r() as u16 + c.g() as u16 + c.b() as u16) < 400,
+            "текст недостаточно тёмный: {c:?}"
+        );
+    }
+
+
+    /// Под шапкой нет лишней линии, а блок консоли отделён мягким фоном,
+    /// а не контуром (пользователь просил убрать двойную линию).
+    #[test]
+    fn header_and_console_have_no_extra_borders() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("TopBottomPanel::top(\"header\")").expect("нет шапки");
+        let header = &code[start..start + 2600];
+        assert!(
+            !header.contains("ui.separator()"),
+            "под вкладками остался разделитель"
+        );
+
+        let c = code.find("let console_bg").expect("нет оформления консоли");
+        let block = &code[c..c + 400];
+        assert!(block.contains("Stroke::NONE"), "у консоли остался контур");
+        assert!(block.contains(".fill(console_bg)"), "нет мягкого фона консоли");
     }
 
 }
