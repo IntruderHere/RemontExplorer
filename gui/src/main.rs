@@ -642,6 +642,8 @@ struct App {
     update_download_error: Option<String>,
     /// Сообщение о включении системной поддержки длинных путей.
     long_paths_msg: Option<String>,
+    /// В этой сессии не ставим обновления автоматически (прошлая установка сорвалась).
+    update_auto_disabled: bool,
     /// Канал фоновой загрузки.
     update_dl_rx: Option<mpsc::Receiver<DlMsg>>,
     /// Обновление готово, но ждёт окончания текущей операции.
@@ -704,6 +706,7 @@ impl Default for App {
             update_exe: None,
             update_download_error: None,
             long_paths_msg: None,
+            update_auto_disabled: false,
             update_dl_rx: None,
             install_after_op: false,
             hwnd: std::sync::Arc::new(AtomicIsize::new(0)),
@@ -746,7 +749,7 @@ impl App {
                 self.update_rx = None;
                 // Обновление найдено — сразу тянем архив в фоне, чтобы к
                 // моменту решения пользователя он уже лежал на диске.
-                if found && (self.ui_config.auto_download || self.ui_config.auto_install) {
+                if found && !self.update_auto_disabled && (self.ui_config.auto_download || self.ui_config.auto_install) {
                     self.start_update_download();
                 }
                 ctx.request_repaint();
@@ -937,6 +940,30 @@ impl App {
                                         &[env!("CARGO_PKG_VERSION").to_string()],
                                     )).weak(),
                                 );
+                            });
+                            // Путь к запущенному файлу: при нескольких копиях
+                            // приложения сразу видно, какая именно работает.
+                            if let Ok(here) = std::env::current_exe() {
+                                ui.add_space(4.0);
+                                centered_row(ui, |ui| {
+                                    ui.label(RichText::new(here.display().to_string()).small().weak());
+                                });
+                            }
+                            // Журнал замены файла: по нему видно, на каком шаге
+                            // установка сорвалась, если обновление не встало.
+                            ui.add_space(2.0);
+                            centered_row(ui, |ui| {
+                                if ui
+                                    .small_button(self.t("upd.open_log"))
+                                    .clicked()
+                                {
+                                    let log = selfupdate::staging_dir().join("update.log");
+                                    if log.exists() {
+                                        open_result_file(&log);
+                                    } else {
+                                        self.push_log(self.t("upd.no_log"));
+                                    }
+                                }
                             });
                             ui.add_space(12.0);
                             ui.add(egui::Label::new(self.t("about.desc")).wrap());
@@ -3181,6 +3208,13 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Прошлая установка не завершилась? Сообщаем и больше не повторяем
+        // автоматически — иначе приложение уходит в цикл «закрылось-открылось».
+        if !self.update_auto_disabled && selfupdate::pending_failed() {
+            selfupdate::clear_pending();
+            self.update_auto_disabled = true;
+            self.push_log(self.t("upd.prev_failed"));
+        }
         self.poll_logs();
         // Дескриптор окна нужен трею, чтобы вернуть окно на экран, когда
         // egui не рисует кадры (окно скрыто в трее).

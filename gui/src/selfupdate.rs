@@ -124,6 +124,11 @@ pub fn apply(current_exe: &Path, new_exe: &Path) -> Result<(), String> {
     let _ = std::fs::create_dir_all(staging_dir());
     log_line(&log, &format!("LAUNCH new={} dst={}", new_exe.display(), current_exe.display()));
 
+    // Метка «обновление начато»: если замена не удастся, следующий запуск
+    // увидит её и не станет повторять установку автоматически.
+    let pending = staging_dir().join("pending.flag");
+    let _ = std::fs::write(&pending, env!("CARGO_PKG_VERSION"));
+
     spawn_self_install(new_exe, current_exe, std::process::id())
         .map_err(|e| format!("не удалось запустить установку: {e} (журнал: {})", log.display()))
 }
@@ -155,12 +160,22 @@ fn spawn_self_install(new_exe: &Path, dst: &Path, old_pid: u32) -> std::io::Resu
 
 /// Режим установки: дождаться выхода старого процесса, заменить файл, запустить.
 ///
+/// Замена повторяется: сразу после выхода процесса файл может быть ещё занят
+/// антивирусом, индексатором или клиентом синхронизации — одиночный
+/// `fs::copy` в этом случае падал, установщик запускал старую версию, и
+/// обновление зацикливалось. Результат проверяется по размеру файла.
+///
 /// Возвращает код выхода процесса-установщика.
 pub fn run_self_install(dst: &Path, old_pid: u32) -> i32 {
     let log = staging_dir().join("update.log");
-    log_line(&log, &format!("INSTALL start dst={} pid={old_pid}", dst.display()));
+    let my_version = env!("CARGO_PKG_VERSION");
+    log_line(
+        &log,
+        &format!("INSTALL start ver={my_version} dst={} pid={old_pid}", dst.display()),
+    );
 
-    for _ in 0..600 {
+    // Ждём выхода старого процесса: заменить работающий exe нельзя.
+    for _ in 0..400 {
         if !process_alive(old_pid) {
             break;
         }
@@ -170,21 +185,95 @@ pub fn run_self_install(dst: &Path, old_pid: u32) -> i32 {
 
     let Ok(me) = std::env::current_exe() else {
         log_line(&log, "INSTALL fail: не определён путь установщика");
+        message_box(
+            "RemontExplorer — обновление",
+            "Не удалось определить путь установщика.\nЗапустите приложение вручную.",
+        );
         return 1;
     };
 
-    match std::fs::copy(&me, dst) {
-        Ok(_) => {
-            log_line(&log, &format!("OK file replaced: {}", dst.display()));
-            let _ = std::process::Command::new(dst).spawn();
-            0
+    let me = std::fs::canonicalize(&me).unwrap_or(me);
+    let dst_cmp = std::fs::canonicalize(dst).unwrap_or_else(|_| dst.to_path_buf());
+    if me == dst_cmp {
+        // Установщик уже лежит на месте приложения — заменять нечего.
+        log_line(&log, "INSTALL skip: установщик и цель совпадают");
+        let _ = std::process::Command::new(dst).spawn();
+        return 0;
+    }
+
+    let new_len = std::fs::metadata(&me).map(|m| m.len()).unwrap_or(0);
+    log_line(&log, &format!("INSTALL copy {} -> {} ({} байт)", me.display(), dst.display(), new_len));
+
+    let mut last_error = String::new();
+    for attempt in 1..=20u32 {
+        // Снимаем «только чтение», если файл помечен: иначе копирование не пройдёт.
+        // Только Windows: на Unix `set_readonly(false)` открыл бы файл всем.
+        #[cfg(windows)]
+        if let Ok(meta) = std::fs::metadata(dst) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(dst, perms);
+            }
         }
-        Err(e) => {
-            log_line(&log, &format!("FAIL copy: {e}"));
-            // Возвращаем пользователю хотя бы старую версию.
-            let _ = std::process::Command::new(dst).spawn();
-            1
+        match std::fs::copy(&me, dst) {
+            Ok(written) => {
+                let ok = std::fs::metadata(dst)
+                    .map(|m| m.len() == new_len && (new_len == 0 || written == new_len))
+                    .unwrap_or(false);
+                if ok {
+                    log_line(&log, &format!("OK file replaced on attempt {attempt}"));
+                    let _ = std::fs::remove_file(staging_dir().join("pending.flag"));
+                    let _ = std::process::Command::new(dst).spawn();
+                    return 0;
+                }
+                last_error = format!("размер после копирования не совпал ({written} != {new_len})");
+                log_line(&log, &format!("RETRY {attempt}: {last_error}"));
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                log_line(&log, &format!("RETRY {attempt}: {e}"));
+            }
         }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    log_line(&log, &format!("FAIL copy: {last_error}"));
+    // Без сообщения пользователь видел бы только «приложение перезапустилось».
+    message_box(
+        "RemontExplorer — обновление не установлено",
+        &format!(
+            "Не удалось заменить файл приложения.\n\n{}\n\nЦель: {}\nЖурнал: {}\n\nЗакройте программу и запустите её снова, либо распакуйте архив обновления вручную.",
+            last_error,
+            dst.display(),
+            log.display()
+        ),
+    );
+    let _ = std::process::Command::new(dst).spawn();
+    1
+}
+
+/// Показать системное окно с сообщением (установщик работает без egui).
+fn message_box(title: &str, text: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+        let wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (t, b) = (wide(title), wide(text));
+        // SAFETY: строки живут до конца вызова.
+        unsafe {
+            MessageBoxW(std::ptr::null_mut(), b.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (title, text);
     }
 }
 
@@ -212,6 +301,16 @@ fn process_alive(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+/// Осталась ли метка о неудачной установке (см. `apply`).
+pub fn pending_failed() -> bool {
+    staging_dir().join("pending.flag").exists()
+}
+
+/// Снять метку после того, как пользователь увидел сообщение.
+pub fn clear_pending() {
+    let _ = std::fs::remove_file(staging_dir().join("pending.flag"));
 }
 
 /// Дописать строку в журнал обновления (ошибки журнала не критичны).
@@ -369,6 +468,21 @@ mod tests {
         assert!(text.contains("OK file replaced"));
         assert_eq!(text.lines().count(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Метка «установка начата» снимается после успеха и читается после сбоя:
+    /// по ней приложение понимает, что обновление не встало, и не зацикливается.
+    #[test]
+    fn pending_flag_roundtrip() {
+        let dir = staging_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let flag = dir.join("pending.flag");
+        let _ = std::fs::remove_file(&flag);
+        assert!(!pending_failed());
+        std::fs::write(&flag, "2.4.0").unwrap();
+        assert!(pending_failed());
+        clear_pending();
+        assert!(!pending_failed());
     }
 
 }
