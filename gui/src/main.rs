@@ -1820,6 +1820,9 @@ impl App {
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        // Небольшой отступ от строки вкладок: блок настроек читается как
+        // отдельная область, а не «прилипший» к шапке.
+        ui.add_space(10.0);
         let ui_before = self.ui_config.clone();
         self.settings_options(ui);
         // Сохраняем только при изменении + сразу применяем все настройки.
@@ -2568,12 +2571,7 @@ impl App {
             self.history_loaded = true;
         }
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(self.t("hist.title"))
-                    .strong()
-                    .size(15.0)
-                    .color(egui::Color32::from_rgb(33, 100, 220)),
-            );
+            ui.label(RichText::new(self.t("hist.title")).strong().size(15.0));
             if ui.button(self.t("hist.refresh")).clicked() {
                 self.reload_history();
             }
@@ -2715,32 +2713,41 @@ impl App {
                 ui.set_width(detail_w);
                 ui.set_height(avail_h);
                 let h = &i18n::help(self.ui_config.lang)[self.help_sel];
-                // Без прокрутки: описание целиком, от верхнего края.
-                ui.heading(h.title);
-                ui.add_space(6.0);
-                ui.label(RichText::new(self.t("help.purpose")).strong());
-                ui.add(egui::Label::new(h.purpose).wrap());
-                ui.add_space(10.0);
-                ui.label(RichText::new(self.t("help.config_file")).strong());
-                ui.add(egui::Label::new(RichText::new(h.config).monospace()).wrap());
-                ui.add_space(10.0);
-                ui.label(RichText::new(self.t("help.format")).strong());
-                ui.add(egui::Label::new(h.cfg_format).wrap());
-                ui.add_space(10.0);
-                ui.label(RichText::new(self.t("help.details")).strong());
-                ui.add(egui::Label::new(h.details).wrap());
-                ui.add_space(10.0);
-                ui.label(RichText::new(self.t("help.example")).strong());
-                ui.group(|ui| {
-                    ui.add(egui::Label::new(RichText::new(h.example).monospace()).wrap());
-                });
-                ui.add_space(10.0);
-                ui.label(RichText::new(self.t("help.result")).strong());
-                ui.group(|ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(h.result_example).monospace()).wrap(),
-                    );
-                });
+                // Содержимое прокручивается: при небольшом окне длинное
+                // описание не помещается целиком (раньше текст просто обрезался).
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .id_salt("help_scroll")
+                    .show(ui, |ui| {
+                        ui.set_width(detail_w - 8.0);
+                        ui.heading(h.title);
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(self.t("help.purpose")).strong());
+                        ui.add(egui::Label::new(h.purpose).wrap());
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(self.t("help.config_file")).strong());
+                        ui.add(egui::Label::new(RichText::new(h.config).monospace()).wrap());
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(self.t("help.format")).strong());
+                        ui.add(egui::Label::new(h.cfg_format).wrap());
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(self.t("help.details")).strong());
+                        ui.add(egui::Label::new(h.details).wrap());
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(self.t("help.example")).strong());
+                        ui.group(|ui| {
+                            ui.add(egui::Label::new(RichText::new(h.example).monospace()).wrap());
+                        });
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(self.t("help.result")).strong());
+                        ui.group(|ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(h.result_example).monospace())
+                                    .wrap(),
+                            );
+                        });
+                        ui.add_space(8.0);
+                    });
             });
         });
     }
@@ -4652,6 +4659,62 @@ mod tests {
             code[start..start + end.min(3000)].contains("ui.add_space(6.0);"),
             "нет отступа под строкой вкладок"
         );
+    }
+
+
+    /// Три правки по интерфейсу: нейтральный заголовок истории, отступ
+    /// блока настроек и прокрутка описания в справке.
+    #[test]
+    fn ui_polish_round() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+
+        // 1) Заголовок «История выполнений» не окрашен.
+        let h = code.find("fn history_tab").expect("нет вкладки истории");
+        let block = &code[h..h + 1500];
+        let title = block.find("hist.title").expect("нет заголовка истории");
+        let line = &block[title..title + 140];
+        assert!(!line.contains(".color("), "заголовок истории всё ещё цветной");
+
+        // 2) Блок настроек отделён от шапки отступом.
+        let s = code.find("fn settings_tab").expect("нет настроек");
+        assert!(
+            code[s..s + 300].contains("ui.add_space(10.0)"),
+            "у настроек нет отступа сверху"
+        );
+
+        // 3) Описание в справке прокручивается.
+        let hp = code.find("fn help_tab").expect("нет справки");
+        let help = &code[hp..hp + 3000];
+        assert!(help.contains("ScrollArea::vertical()"), "в справке нет прокрутки");
+        assert!(help.contains(r#"id_salt("help_scroll")"#), "нет отдельного состояния прокрутки");
+    }
+
+
+    /// Справка рисуется в минимальном окне (800×600): длинный текст
+    /// прокручивается, а не обрезается и не паникует.
+    #[test]
+    fn help_renders_in_small_window() {
+        let _d = test_data_dir();
+        let mut app = App {
+            top_tab: TopTab::Help,
+            help_sel: 2, // «Сканирование» — длинный раздел
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.help_tab(ui));
+            });
+        }
+        assert_eq!(app.help_sel, 2);
     }
 
 }
