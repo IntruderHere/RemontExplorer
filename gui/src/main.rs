@@ -291,6 +291,18 @@ fn open_result_file(path: &Path) {
     }
 }
 
+/// Можно ли создать файл в каталоге (проверка пробным файлом).
+fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".remont_probe_{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Убрать Windows-префикс длинных путей (`\\?\`, `\\?\UNC\`).
 ///
 /// Оболочка (`ShellExecute`) и Проводник префикс не понимают — с ним не
@@ -1555,6 +1567,15 @@ impl App {
             self.update_download_error = Some(self.t("upd.no_path").to_string());
             return;
         };
+        // Приложение может лежать в Program Files — тогда заменить файл без
+        // прав администратора нельзя. Сообщаем заранее, не закрывая окно.
+        if let Some(dir) = current.parent() {
+            if !dir_writable(dir) {
+                let msg = self.tf("upd.no_permission", &[dir.display().to_string()]);
+                self.update_download_error = Some(msg);
+                return;
+            }
+        }
         save_ui_config(&self.ui_config);
         self.sched.save();
         match selfupdate::apply(&current, &new_exe) {
@@ -5306,7 +5327,7 @@ mod tests {
         assert!(code.contains("if self.install_after_op && !self.running"));
         // Установка сохраняет состояние и заменяет файл.
         let start = code.find("fn apply_update").expect("нет установки");
-        let block = &code[start..start + 900];
+        let block = &code[start..start + 1600];
         assert!(block.contains("save_ui_config"));
         assert!(block.contains("self.sched.save()"));
         assert!(block.contains("selfupdate::apply"));
@@ -5354,6 +5375,36 @@ mod tests {
             "ряд режимов не переносится — кнопки обрезаются"
         );
         let _ = start;
+    }
+
+
+    /// Права администратора не нужны: конфиги и реестр — в профиле пользователя.
+    /// Единственное место, где может помешать ACL, — запись exe при обновлении;
+    /// об этом приложение предупреждает заранее.
+    #[test]
+    fn no_admin_rights_required_anywhere() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        // Ни манифеста с requireAdministrator, ни запуска с "runas".
+        assert!(!code.contains("requireAdministrator"));
+        assert!(!code.contains(r#""runas""#));
+
+        // Проверка записи в папку приложения перед установкой.
+        let start = code.find("fn apply_update").expect("нет установки");
+        let block = &code[start..start + 1200];
+        assert!(block.contains("dir_writable"), "нет проверки прав на папку");
+        assert!(block.contains("upd.no_permission"), "нет понятного сообщения");
+    }
+
+    /// Проверка записи: в обычном каталоге — да, в несуществующем — нет.
+    #[test]
+    fn dir_writable_detects_permissions() {
+        let dir = std::env::temp_dir().join(format!("re_perm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(dir_writable(&dir));
+        assert!(!dir_writable(&dir.join("нет-такого-каталога")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }
