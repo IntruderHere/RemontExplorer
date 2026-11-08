@@ -8,12 +8,20 @@ use remont_core::{
 use std::fs;
 use std::sync::{Arc, Mutex};
 
+/// Общая настройка `output_dir` — глобальная, значит тесты файла не должны
+/// идти параллельно и перетирать её друг другу.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn quiet() -> remont_core::LogSink {
     Arc::new(Mutex::new(Sink::text_only(|_| {})))
 }
 
 #[test]
 fn reports_go_to_configured_folder() {
+    let _g = env_lock();
     let tmp = std::env::temp_dir().join(format!("fm_outdir_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     let src = tmp.join("src");
@@ -51,6 +59,7 @@ fn reports_go_to_configured_folder() {
 
 #[test]
 fn default_report_path_is_absolute() {
+    let _g = env_lock();
     set_output_dir(None);
     let p = resolve_report_path("files_info_260885_Новые_материалы_20261106_164503.xlsx");
     assert!(

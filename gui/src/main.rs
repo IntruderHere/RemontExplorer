@@ -8,6 +8,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // без консольного окна
 
 mod i18n;
+mod logfmt;
+mod notify;
 mod schedule;
 mod tray;
 mod updates;
@@ -63,6 +65,18 @@ struct UiConfig {
     /// Проверять обновления на GitHub при запуске.
     #[serde(default = "default_true")]
     check_updates: bool,
+    /// Показывать уведомление Windows по завершении операции.
+    #[serde(default = "default_true")]
+    notify: bool,
+    /// Как удалять: безвозвратно, в корзину или в архив.
+    #[serde(default)]
+    delete_mode: remont_core::DeleteMode,
+    /// Сверять копии по SHA-256 после копирования.
+    #[serde(default)]
+    verify_copy: bool,
+    /// Проверять свободное место перед копированием.
+    #[serde(default = "default_true")]
+    check_space: bool,
 }
 
 impl Default for UiConfig {
@@ -75,6 +89,10 @@ impl Default for UiConfig {
             output_dir: String::new(),
             open_result: false,
             check_updates: true,
+            notify: true,
+            delete_mode: remont_core::DeleteMode::Permanent,
+            verify_copy: false,
+            check_space: true,
         }
     }
 }
@@ -364,7 +382,21 @@ enum TopTab {
     Work,
     Settings,
     Schedule,
+    History,
     Help,
+}
+
+/// Метаданные запущенной операции — попадают в историю выполнений.
+#[derive(Clone, Debug, Default)]
+struct OpMeta {
+    /// Машинный код режима: scan, copy, delete, ...
+    mode: String,
+    /// Название на языке интерфейса.
+    title: String,
+    /// Входные пути.
+    paths: Vec<String>,
+    /// Откуда запущено: gui, schedule, context-menu.
+    source: String,
 }
 
 /// Модальные вопросы и диалоги выбора.
@@ -390,6 +422,8 @@ enum ConfirmKind {
     CreateZip,
     CopyResume,
     SavePairMismatch,
+    /// Очистка истории выполнений.
+    ClearHistory,
 }
 
 struct App {
@@ -452,6 +486,19 @@ struct App {
     startup_done: bool,
     /// Найденное обновление (версия новее текущей).
     update_info: Option<updates::UpdateInfo>,
+    /// Метаданные текущей операции (для журнала истории).
+    op_meta: Option<OpMeta>,
+    /// Начало текущей операции.
+    op_started: Option<std::time::Instant>,
+    /// Прочитанная история выполнений (вкладка «История»).
+    history: Vec<remont_core::HistoryEntry>,
+    /// История уже читалась с диска.
+    history_loaded: bool,
+    /// Последняя сводка истории.
+    history_summary: remont_core::history::Summary,
+    /// Пути сравниваемых отчётов (режим «Сравнение» → «Сравнить отчёты»).
+    diff_old: String,
+    diff_new: String,
     /// Текст ошибки проверки обновлений (показывается в «О приложении»).
     update_error: Option<String>,
     /// Проверка обновлений уже выполнялась/выполняется.
@@ -499,6 +546,13 @@ impl Default for App {
             startup_scan: None,
             start_hidden: false,
             startup_done: false,
+            op_meta: None,
+            op_started: None,
+            history: Vec::new(),
+            history_loaded: false,
+            history_summary: Default::default(),
+            diff_old: String::new(),
+            diff_new: String::new(),
             update_info: None,
             update_error: None,
             update_done: false,
@@ -594,7 +648,13 @@ impl App {
         let threads = self.scan_threads;
         self.mode = Some(Mode::Scan);
         self.push_log(&self.tf("log.external_scan", &[dir.display().to_string()]));
-        self.spawn_op(move |log, stop| {
+        let meta = OpMeta {
+            mode: "scan".into(),
+            title: self.t("mode.scan").to_string(),
+            paths: vec![dir.display().to_string()],
+            source: "context-menu".into(),
+        };
+        self.spawn_op_meta(meta, move |log, stop| {
             match scan_folder(&dir, None, threads, &stop, &log) {
                 Some((out, stats)) => emit(
                     &log,
@@ -806,9 +866,48 @@ impl App {
     /// Паника в операции перехватывается: приложение живёт, в консоль
     /// выводится текст внутренней ошибки.
     fn spawn_op(&mut self, f: impl FnOnce(LogSink, StopToken) + Send + 'static) {
+        let meta = self.current_meta();
+        self.spawn_op_meta(meta, f);
+    }
+
+    /// Метаданные операции по выбранному режиму и его файлу настройки.
+    fn current_meta(&self) -> OpMeta {
+        let Some(m) = self.mode else {
+            return OpMeta::default();
+        };
+        let def = mode_def(m);
+        let paths = read_paths_file(&config_path(def.config))
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        OpMeta {
+            mode: match m {
+                Mode::Delete => "delete",
+                Mode::Create => "create",
+                Mode::Scan => "scan",
+                Mode::Compare => "compare",
+                Mode::Cleanup => "cleanup",
+                Mode::Copy => "copy",
+                Mode::Duplicates => "duplicates",
+            }
+            .into(),
+            title: self.t(mode_key(m)).to_string(),
+            paths,
+            source: "gui".into(),
+        }
+    }
+
+    /// Запуск операции с явными метаданными (расписание, контекстное меню).
+    fn spawn_op_meta(
+        &mut self,
+        meta: OpMeta,
+        f: impl FnOnce(LogSink, StopToken) + Send + 'static,
+    ) {
         if self.running {
             return;
         }
+        self.op_meta = Some(meta);
+        self.op_started = Some(std::time::Instant::now());
         let (tx, rx) = mpsc::channel::<String>();
         let (txp, rxp) = mpsc::channel::<(usize, usize)>();
         let tx_done = tx.clone();
@@ -875,6 +974,7 @@ impl App {
                 self.log_rx = None;
                 self.prog_rx = None;
                 self.progress = None;
+                self.finish_op();
                 // Настройка «открывать полученный файл после выполнения».
                 if self.ui_config.open_result {
                     if let Some(path) = remont_core::last_report() {
@@ -888,16 +988,108 @@ impl App {
         }
     }
 
+    /// Операция завершилась: пишем историю и (если включено) уведомление.
+    fn finish_op(&mut self) {
+        let Some(meta) = self.op_meta.take() else {
+            return;
+        };
+        if meta.mode.is_empty() {
+            return;
+        }
+        let seconds = self
+            .op_started
+            .take()
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let errors = self.logs.iter().filter(|l| logfmt::is_error(l)).count();
+        let outcome = if self.stop.is_set() {
+            remont_core::Outcome::Aborted
+        } else if errors > 0 {
+            remont_core::Outcome::Failed
+        } else {
+            remont_core::Outcome::Ok
+        };
+
+        let mut entry = remont_core::HistoryEntry::new(meta.mode.clone(), meta.title.clone());
+        entry.paths = meta.paths.clone();
+        entry.errors = errors;
+        entry.seconds = seconds;
+        entry.report = remont_core::last_report().map(|p| p.display().to_string());
+        entry.outcome = outcome;
+        entry.source = meta.source.clone();
+        entry.details = self.logs.back().cloned().unwrap_or_default();
+        let _ = entry.record();
+
+        // Уведомление Windows — не должно мешать, ошибки игнорируются.
+        if self.ui_config.notify {
+            let key = match outcome {
+                remont_core::Outcome::Ok => "notify.done",
+                remont_core::Outcome::Failed => "notify.error",
+                remont_core::Outcome::Aborted => "notify.aborted",
+            };
+            let body = self.tf(key, std::slice::from_ref(&meta.title));
+            let title = self.t("notify.title").to_string();
+            notify::notify(
+                self.hwnd.load(Ordering::Relaxed),
+                &title,
+                &body,
+                outcome != remont_core::Outcome::Ok,
+            );
+        }
+
+        self.reload_history();
+    }
+
+    /// Перечитать историю с диска (вкладка «История»).
+    fn reload_history(&mut self) {
+        self.history = remont_core::history::read_all();
+        self.history_summary = remont_core::history::summarize(&self.history);
+    }
+
     // ==================== ВКЛАДКА «РАБОТА» ====================
 
     fn work_tab(&mut self, ui: &mut egui::Ui) {
+        // Цвета режимов для визуальной индикации
+        let mode_colors = [
+            egui::Color32::from_rgb(220, 53, 69),    // Удаление — красный
+            egui::Color32::from_rgb(40, 167, 69),    // Создание — зелёный
+            egui::Color32::from_rgb(33, 100, 220),   // Сканирование — синий
+            egui::Color32::from_rgb(255, 159, 10),   // Сравнение — оранжевый
+            egui::Color32::from_rgb(108, 117, 125),  // Очистка — серый
+            egui::Color32::from_rgb(0, 123, 167),    // Копирование — бирюзовый
+            egui::Color32::from_rgb(154, 52, 185),   // Дубликаты — фиолетовый
+        ];
+        let mode_names: [(&'static str, &'static str); 7] = [
+            ("mode.delete", "🗑"),
+            ("mode.create", "📁"),
+            ("mode.scan", "🔍"),
+            ("mode.compare", "⚖"),
+            ("mode.cleanup", "🧹"),
+            ("mode.copy", "📋"),
+            ("mode.duplicates", "🔎"),
+        ];
+
         ui.horizontal(|ui| {
-            for def in &MODES {
-                let label = self.t(mode_key(def.mode));
+            for (i, def) in MODES.iter().enumerate() {
+                let (key, icon) = mode_names[i];
+                let label = self.t(key);
+                let color = mode_colors[i];
+                let is_active = self.mode == Some(def.mode);
                 if self.running {
-                    ui.label(RichText::new(label).weak());
+                    ui.label(
+                        RichText::new(format!("{} {}", icon, label))
+                            .size(13.0)
+                            .color(if is_active { color } else { color.linear_multiply(0.4) })
+                            .weak(),
+                    );
                 } else {
-                    ui.selectable_value(&mut self.mode, Some(def.mode), label);
+                    let btn = egui::Button::new(format!("{} {}", icon, label))
+                        .fill(if is_active { color.linear_multiply(0.15) } else { egui::Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::new(1.0_f32, if is_active { color } else { egui::Color32::TRANSPARENT }))
+                        .rounding(egui::Rounding::same(4.0));
+                    if ui.add(btn).clicked() {
+                        self.mode = Some(def.mode);
+                    }
                 }
             }
             ui.separator();
@@ -928,8 +1120,71 @@ impl App {
         });
 
         if let Some(m) = self.mode {
-            ui.add(egui::Label::new(RichText::new(self.t(desc_key(m))).weak()).wrap());
+            let ci = match m {
+                Mode::Delete => 0, Mode::Create => 1, Mode::Scan => 2,
+                Mode::Compare => 3, Mode::Cleanup => 4, Mode::Copy => 5, Mode::Duplicates => 6,
+            };
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("● ").color(mode_colors[ci]).size(10.0),
+                );
+                ui.add(egui::Label::new(RichText::new(self.t(desc_key(m))).weak()).wrap());
+            });
         }
+        // Сравнение отчётов — дополнительный инструмент режима «Сравнение».
+        if self.mode == Some(Mode::Compare) {
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(self.t("cmp.reports"))
+                            .strong()
+                            .color(egui::Color32::from_rgb(255, 159, 10)),
+                    );
+                    ui.label(RichText::new(self.t("cmp.reports_hint")).weak());
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(self.t("cmp.old"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.diff_old)
+                            .desired_width(320.0)
+                            .hint_text("*.csv / *.xlsx"),
+                    );
+                    if ui.button(self.t("cmp.pick_old")).clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .set_title(self.t("cmp.pick_old"))
+                            .add_filter("CSV/XLSX", &["csv", "xlsx"])
+                            .pick_file()
+                        {
+                            self.diff_old = p.display().to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(self.t("cmp.new"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.diff_new)
+                            .desired_width(320.0)
+                            .hint_text("*.csv / *.xlsx"),
+                    );
+                    if ui.button(self.t("cmp.pick_new")).clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .set_title(self.t("cmp.pick_new"))
+                            .add_filter("CSV/XLSX", &["csv", "xlsx"])
+                            .pick_file()
+                        {
+                            self.diff_new = p.display().to_string();
+                        }
+                    }
+                    let ready = !self.running && !self.diff_old.trim().is_empty() && !self.diff_new.trim().is_empty();
+                    if ui.add_enabled(ready, egui::Button::new(self.t("cmp.run"))).clicked() {
+                        self.start_diff();
+                    }
+                });
+            });
+        }
+
         // Прогресс-бар активной операции
         if self.running {
             let frac = match self.progress {
@@ -945,7 +1200,21 @@ impl App {
                 Some((c, t)) if t > 0 => format!("{c} / {t}"),
                 _ => self.t("lbl.executing").to_string(),
             };
-            ui.add(egui::ProgressBar::new(frac).text(label));
+            let prog = egui::ProgressBar::new(frac)
+                .text(label)
+                .animate(true)
+                .show_percentage();
+            // Кастомный цвет прогресс-бара (стиль меняется на кадр и
+            // возвращается — иначе он «протекает» в следующие элементы).
+            let prev_stroke = ui.ctx().style().visuals.widgets.active.fg_stroke;
+            ui.ctx().style_mut(|st| {
+                st.visuals.widgets.active.fg_stroke =
+                    egui::Stroke::new(10.0_f32, egui::Color32::from_rgb(33, 100, 220));
+            });
+            ui.add(prog);
+            ui.ctx().style_mut(|st| {
+                st.visuals.widgets.active.fg_stroke = prev_stroke;
+            });
         }
         ui.add_space(2.0);
 
@@ -965,7 +1234,8 @@ impl App {
                         );
                     }
                     for line in &self.logs {
-                        ui.label(RichText::new(line).monospace().size(12.0));
+                        let color = logfmt::line_color(line, ui.style().visuals.text_color());
+                        ui.label(RichText::new(line).monospace().size(12.0).color(color));
                     }
                 });
         });
@@ -989,6 +1259,52 @@ impl App {
     }
 
     /// Запуск операции по кнопке «Старт».
+    /// Сравнить два отчёта сканирования: что появилось, исчезло, изменилось.
+    fn start_diff(&mut self) {
+        let old = std::path::PathBuf::from(self.diff_old.trim());
+        let new = std::path::PathBuf::from(self.diff_new.trim());
+        if old.as_os_str().is_empty() || new.as_os_str().is_empty() {
+            self.push_log(self.t("cmp.need_files"));
+            return;
+        }
+        let meta = OpMeta {
+            mode: "diff".into(),
+            title: self.t("cmp.reports").to_string(),
+            paths: vec![
+                old.display().to_string(),
+                new.display().to_string(),
+            ],
+            source: "gui".into(),
+        };
+        self.spawn_op_meta(meta, move |log, _stop| {
+            match remont_core::report_diff::diff_reports(&old, &new) {
+                Ok((rows, stats)) => {
+                    let name = format!(
+                        "diff_{}.csv",
+                        chrono::Local::now().format("%Y%m%d_%H%M%S")
+                    );
+                    let path = remont_core::resolve_report_path(name);
+                    match remont_core::report_diff::save_diff_report(&rows, &stats, path) {
+                        Ok(_p) => emit(
+                            &log,
+                            tfg(
+                                "cmp.done",
+                                &[
+                                    stats.added.to_string(),
+                                    stats.removed.to_string(),
+                                    stats.changed.to_string(),
+                                    stats.same.to_string(),
+                                ],
+                            ),
+                        ),
+                        Err(e) => emit(&log, tfg("cmp.failed", &[e.to_string()])),
+                    }
+                }
+                Err(e) => emit(&log, tfg("cmp.failed", &[e.to_string()])),
+            }
+        });
+    }
+
     fn start_action(&mut self) {
         let Some(mode) = self.mode else {
             return;
@@ -1140,9 +1456,10 @@ impl App {
     fn confirm_yes(&mut self, kind: ConfirmKind) {
         match kind {
             ConfirmKind::DeleteRecursive => {
-                let paths = read_paths_file(Path::new("config/folders_to_delete.txt"));
+                let paths = read_paths_file(&config_path("folders_to_delete.txt"));
+                let mode = self.ui_config.delete_mode;
                 self.spawn_op(move |log, stop| {
-                    let s = delete_paths(&paths, true, &stop, &log);
+                    let s = remont_core::delete_paths_opts(&paths, true, mode, &stop, &log);
                     emit(
                         &log,
                         tfg(
@@ -1157,7 +1474,7 @@ impl App {
                 });
             }
             ConfirmKind::CreateZip => {
-                let paths = read_paths_file(Path::new("config/folders_to_create.txt"));
+                let paths = read_paths_file(&config_path("folders_to_create.txt"));
                 self.spawn_op(move |log, stop| {
                     let created = create_folders(&paths, &stop, &log);
                     emit(&log, tfg("log.create_summary", &[created.len().to_string()]));
@@ -1172,14 +1489,32 @@ impl App {
             }
             ConfirmKind::CopyResume => {
                 let cfg = config_path("from_to.csv");
+                let opts = remont_core::copy::CopyOptions {
+                    verify: self.ui_config.verify_copy,
+                    check_space: self.ui_config.check_space,
+                };
                 self.spawn_op(move |log, stop| {
-                    let cache = cfg.with_extension("resume.json");
-                    let n = copy_files_from_list(&cfg, &cache, 16, true, &stop, &log);
-                    emit(&log, tfg("log.copy_summary", &[n.to_string()]));
+                    let cache = remont_core::paths::config_path("copy_resume.json");
+                    let rep = remont_core::copy::copy_files_from_list_opts(
+                        &cfg, &cache, 16, true, opts, &stop, &log,
+                    );
+                    emit(&log, tfg("log.copy_summary", &[rep.copied.to_string()]));
                 });
             }
             ConfirmKind::SavePairMismatch => {
                 self.save_pair_config(true);
+            }
+            ConfirmKind::ClearHistory => {
+                match remont_core::history::clear() {
+                    Ok(()) => {
+                        self.push_log(self.t("hist.cleared"));
+                        self.reload_history();
+                    }
+                    Err(e) => {
+                        let msg = self.tf("hist.failed", &[e.to_string()]);
+                        self.push_log(&msg);
+                    }
+                }
             }
         }
     }
@@ -1188,9 +1523,10 @@ impl App {
     fn confirm_no(&mut self, kind: ConfirmKind) {
         match kind {
             ConfirmKind::DeleteRecursive => {
-                let paths = read_paths_file(Path::new("config/folders_to_delete.txt"));
+                let paths = read_paths_file(&config_path("folders_to_delete.txt"));
+                let mode = self.ui_config.delete_mode;
                 self.spawn_op(move |log, stop| {
-                    let s = delete_paths(&paths, false, &stop, &log);
+                    let s = remont_core::delete_paths_opts(&paths, false, mode, &stop, &log);
                     emit(
                         &log,
                         tfg(
@@ -1201,7 +1537,7 @@ impl App {
                 });
             }
             ConfirmKind::CreateZip => {
-                let paths = read_paths_file(Path::new("config/folders_to_create.txt"));
+                let paths = read_paths_file(&config_path("folders_to_create.txt"));
                 self.spawn_op(move |log, stop| {
                     let created = create_folders(&paths, &stop, &log);
                     emit(&log, tfg("log.create_summary", &[created.len().to_string()]));
@@ -1209,15 +1545,22 @@ impl App {
             }
             ConfirmKind::CopyResume => {
                 let cfg = config_path("from_to.csv");
+                let opts = remont_core::copy::CopyOptions {
+                    verify: self.ui_config.verify_copy,
+                    check_space: self.ui_config.check_space,
+                };
                 self.spawn_op(move |log, stop| {
-                    let cache = cfg.with_extension("resume.json");
-                    let n = copy_files_from_list(&cfg, &cache, 16, false, &stop, &log);
-                    emit(&log, tfg("log.copy_summary", &[n.to_string()]));
+                    let cache = remont_core::paths::config_path("copy_resume.json");
+                    let rep = remont_core::copy::copy_files_from_list_opts(
+                        &cfg, &cache, 16, false, opts, &stop, &log,
+                    );
+                    emit(&log, tfg("log.copy_summary", &[rep.copied.to_string()]));
                 });
             }
             ConfirmKind::SavePairMismatch => {
                 // «Нет» = не сохранять
             }
+            ConfirmKind::ClearHistory => {}
         }
     }
 
@@ -1247,6 +1590,10 @@ impl App {
         let l_reset = self.t("ui.output_reset").to_string();
         let l_open_result = self.t("ui.open_result").to_string();
         let l_check_updates = self.t("ui.check_updates").to_string();
+        let l_notify = self.t("ui.notify").to_string();
+        let l_delete_mode = self.t("ui.delete_mode").to_string();
+        let l_verify_copy = self.t("ui.verify_copy").to_string();
+        let l_check_space = self.t("ui.check_space").to_string();
         let l_menu = self.tf("win.ctx_menu", &[winshell::menu_caption(self.ui_config.lang == Lang::Ru).to_string()]);
         let l_auto = self.t("win.autostart").to_string();
         let l_tray = self.t("win.tray").to_string();
@@ -1254,7 +1601,27 @@ impl App {
 
         let mut browse = false;
         let mut reset = false;
+        // Акцентный цвет для заголовков секций
+        let accent = egui::Color32::from_rgb(33, 100, 220);
+        // Тонкий разделитель между секциями настроек.
+        let theme_style = |ui: &mut egui::Ui| {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+        };
+
+        // Секция «Интерфейс»
         ui.group(|ui| {
+            theme_style(ui);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(self.t("ui.section_interface"))
+                        .strong()
+                        .size(14.0)
+                        .color(accent),
+                );
+            });
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(&l_theme);
                 ui.selectable_value(&mut self.ui_config.theme, ThemeMode::Light, &l_light);
@@ -1290,12 +1657,66 @@ impl App {
             });
 
             ui.checkbox(&mut self.ui_config.open_result, &l_open_result);
+            ui.checkbox(&mut self.ui_config.notify, &l_notify);
+
+            // Способ удаления: безвозвратно / корзина / архив.
+            ui.horizontal(|ui| {
+                ui.label(&l_delete_mode);
+                for m in remont_core::DeleteMode::ALL {
+                    ui.selectable_value(
+                        &mut self.ui_config.delete_mode,
+                        m,
+                        m.label(self.ui_config.lang),
+                    );
+                }
+            });
+
+            ui.checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
+            ui.checkbox(&mut self.ui_config.check_space, &l_check_space);
             ui.checkbox(&mut self.ui_config.check_updates, &l_check_updates);
 
             if is_win {
+                // Windows-настройки со статус-индикаторами
+                theme_style(ui);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Windows")
+                            .strong()
+                            .size(14.0)
+                            .color(accent),
+                    );
+                });
+                ui.add_space(6.0);
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
-                if ui.add(egui::Checkbox::new(&mut menu_on, &l_menu)).changed()
-                {
+                let menu_status = if self.ctx_menu.is_none() {
+                    RichText::new("—").weak().color(egui::Color32::from_rgb(150, 150, 150))
+                } else if menu_on {
+                    RichText::new("● ").color(egui::Color32::from_rgb(40, 167, 69)).size(10.0)
+                } else {
+                    RichText::new("○ ").weak().color(egui::Color32::from_rgb(150, 150, 150))
+                };
+                ui.horizontal(|ui| {
+                    ui.label(menu_status);
+                    ui.add(egui::Checkbox::new(&mut menu_on, &l_menu));
+                });
+                let mut auto_on = self.autostart.unwrap_or(false);
+                let auto_status = if self.autostart.is_none() {
+                    RichText::new("—").weak().color(egui::Color32::from_rgb(150, 150, 150))
+                } else if auto_on {
+                    RichText::new("● ").color(egui::Color32::from_rgb(40, 167, 69)).size(10.0)
+                } else {
+                    RichText::new("○ ").weak().color(egui::Color32::from_rgb(150, 150, 150))
+                };
+                ui.horizontal(|ui| {
+                    ui.label(auto_status);
+                    ui.add(egui::Checkbox::new(&mut auto_on, &l_auto));
+                });
+                ui.add(egui::Checkbox::new(
+                    &mut self.ui_config.close_to_tray,
+                    &l_tray,
+                ));
+                // Обработка изменений (после отрисовки статусов)
+                if menu_on != self.ctx_menu.unwrap_or(false) {
                     let exe = winshell::exe_path();
                     let caption = winshell::menu_caption(self.ui_config.lang == Lang::Ru);
                     let res = if menu_on {
@@ -1318,9 +1739,7 @@ impl App {
                         }
                     }
                 }
-                let mut auto_on = self.autostart.unwrap_or(false);
-                if ui.add(egui::Checkbox::new(&mut auto_on, &l_auto)).changed()
-                {
+                if auto_on != self.autostart.unwrap_or(false) {
                     let exe = winshell::exe_path();
                     let minimized = self.ui_config.close_to_tray;
                     let res = if auto_on {
@@ -1343,10 +1762,6 @@ impl App {
                         }
                     }
                 }
-                ui.add(egui::Checkbox::new(
-                    &mut self.ui_config.close_to_tray,
-                    &l_tray,
-                ));
             } else {
                 ui.label(RichText::new(l_na).weak());
             }
@@ -1385,6 +1800,13 @@ impl App {
         if self.ui_config.theme != self.applied_theme {
             self.applied_theme = self.ui_config.theme;
             ui.ctx().set_theme(theme_preference(self.applied_theme));
+            // Заголовок окна рисует Windows — ему тему нужно сообщить отдельно.
+            let dark = match self.applied_theme {
+                ThemeMode::Dark => true,
+                ThemeMode::Light => false,
+                ThemeMode::System => ui.ctx().style().visuals.dark_mode,
+            };
+            winshell::set_dark_title(self.hwnd.load(Ordering::Relaxed), dark);
             ui.ctx().request_repaint();
         }
 
@@ -1667,6 +2089,16 @@ impl App {
         let avail_h = ui.available_height();
         let mut add_task = false;
         let mut del_task = false;
+        // Цвета режимов для списка заданий
+        let mode_colors = [
+            egui::Color32::from_rgb(220, 53, 69),
+            egui::Color32::from_rgb(40, 167, 69),
+            egui::Color32::from_rgb(33, 100, 220),
+            egui::Color32::from_rgb(255, 159, 10),
+            egui::Color32::from_rgb(108, 117, 125),
+            egui::Color32::from_rgb(0, 123, 167),
+            egui::Color32::from_rgb(154, 52, 185),
+        ];
         ui.horizontal(|ui| {
             let list_w = 300.0;
             let right_margin = 12.0;
@@ -1693,7 +2125,14 @@ impl App {
                     // Подписи собираются заранее: во время выбора нельзя
                     // держать заимствование `self` (см. self.t внутри цикла).
                     let labels: Vec<String> = self.sched.tasks.iter().map(|t| {
+                            let mode_idx = mode_from_key(&t.mode)
+                                .map(|m| match m {
+                                    Mode::Delete => 0, Mode::Create => 1, Mode::Scan => 2,
+                                    Mode::Compare => 3, Mode::Cleanup => 4, Mode::Copy => 5, Mode::Duplicates => 6,
+                                })
+                                .unwrap_or(0);
                             let mode_label = mode_from_key(&t.mode).map(|m| self.t(mode_key(m))).unwrap_or("?");
+                            let _ = mode_idx;
                             let state = if t.enabled && t.remaining > 0 {
                                 format!("  ({}, {})", t.time_label(), t.remaining)
                             } else {
@@ -1702,7 +2141,22 @@ impl App {
                             format!("{mode_label}{state}")
                         }).collect();
                     for (i, label) in labels.into_iter().enumerate() {
-                        ui.selectable_value(&mut self.sched_sel, i, label);
+                        let task = &self.sched.tasks[i];
+                        let mode_idx = mode_from_key(&task.mode)
+                            .map(|m| match m {
+                                Mode::Delete => 0, Mode::Create => 1, Mode::Scan => 2,
+                                Mode::Compare => 3, Mode::Cleanup => 4, Mode::Copy => 5, Mode::Duplicates => 6,
+                            })
+                            .unwrap_or(0);
+                        let color = mode_colors[mode_idx];
+                        let sel_style = if self.sched_sel == i {
+                            RichText::new(label).color(color).size(13.0)
+                        } else {
+                            RichText::new(label).weak().size(12.0)
+                        };
+                        if ui.selectable_label(self.sched_sel == i, sel_style).clicked() {
+                            self.sched_sel = i;
+                        }
                     }
                 }
                 ui.add_space(4.0);
@@ -1963,7 +2417,13 @@ impl App {
         let threads = self.scan_threads;
         let out = out_dir.clone();
         let task_name = name.clone();
-        self.spawn_op(move |log, stop| {
+        let meta = OpMeta {
+            mode: task.mode.clone(),
+            title: format!("{} ({})", name, self.t("tab.schedule")),
+            paths: paths.iter().map(|p| p.display().to_string()).collect(),
+            source: "schedule".into(),
+        };
+        self.spawn_op_meta(meta, move |log, stop| {
             match mode {
                 Mode::Delete => {
                     let s = delete_paths(&paths, true, &stop, &log);
@@ -2055,6 +2515,143 @@ impl App {
     }
 
     // ==================== ВКЛАДКА «СПРАВКА» ====================
+
+    // ==================== ВКЛАДКА «ИСТОРИЯ» ====================
+
+    /// История выполнений: каждая операция (включая расписание и контекстное
+    /// меню) попадает в журнал `Документы\RemontExplorer\logs\history.jsonl`.
+    fn history_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.history_loaded {
+            self.reload_history();
+            self.history_loaded = true;
+        }
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(self.t("hist.title"))
+                    .strong()
+                    .size(15.0)
+                    .color(egui::Color32::from_rgb(33, 100, 220)),
+            );
+            if ui.button(self.t("hist.refresh")).clicked() {
+                self.reload_history();
+            }
+            if ui.button(self.t("hist.open_folder")).clicked() {
+                let dir = remont_core::paths::logs_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                open_result_file(&dir);
+            }
+            if ui.button(self.t("hist.export")).clicked() {
+                let name = format!("history_{}.csv", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+                let path = remont_core::resolve_report_path(name);
+                match remont_core::history::export_csv(&path) {
+                    Ok(()) => {
+                        let msg = self.tf("hist.exported", &[path.display().to_string()]);
+                        self.push_log(&msg);
+                        if self.ui_config.open_result {
+                            open_result_file(&path);
+                        }
+                    }
+                    Err(e) => {
+                        let msg = self.tf("hist.failed", &[e.to_string()]);
+                        self.push_log(&msg);
+                    }
+                }
+            }
+            if ui.button(self.t("hist.clear")).clicked() {
+                self.pending = Some(Pending::Confirm {
+                    title: self.t("hist.clear").into(),
+                    prompt: self.t("hist.clear_confirm").into(),
+                    kind: ConfirmKind::ClearHistory,
+                });
+            }
+        });
+        ui.add_space(6.0);
+
+        let summary = self.history_summary.clone();
+        ui.label(
+            RichText::new(self.tf(
+                "hist.count",
+                &[
+                    summary.total.to_string(),
+                    summary.ok.to_string(),
+                    summary.failed.to_string(),
+                    summary.aborted.to_string(),
+                ],
+            ))
+            .weak(),
+        );
+        ui.separator();
+
+        if self.history.is_empty() {
+            ui.label(self.t("hist.empty"));
+            return;
+        }
+
+        // Свежие записи — сверху.
+        let rows: Vec<remont_core::HistoryEntry> = self.history.iter().rev().cloned().collect();
+        let mut to_open: Option<std::path::PathBuf> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("history_grid")
+                .striped(true)
+                .num_columns(6)
+                .spacing([14.0, 4.0])
+                .show(ui, |ui| {
+                    for h in [
+                        "hist.col.when",
+                        "hist.col.mode",
+                        "hist.col.paths",
+                        "hist.col.outcome",
+                        "hist.col.duration",
+                        "hist.col.result",
+                    ] {
+                        ui.label(RichText::new(self.t(h)).strong());
+                    }
+                    ui.end_row();
+
+                    for e in &rows {
+                        let when = chrono::DateTime::parse_from_rfc3339(&e.when)
+                            .map(|d| d.format("%d.%m.%Y %H:%M").to_string())
+                            .unwrap_or_else(|_| e.when.clone());
+                        ui.label(when);
+                        ui.label(&e.title);
+                        let paths = e.paths.join(", ");
+                        let short = if paths.chars().count() > 60 {
+                            format!("{}…", paths.chars().take(60).collect::<String>())
+                        } else {
+                            paths
+                        };
+                        ui.label(short).on_hover_text(e.paths.join("\n"));
+                        let (color, key) = match e.outcome {
+                            remont_core::Outcome::Ok => {
+                                (egui::Color32::from_rgb(40, 167, 69), "hist.outcome.ok")
+                            }
+                            remont_core::Outcome::Failed => {
+                                (egui::Color32::from_rgb(200, 60, 60), "hist.outcome.failed")
+                            }
+                            remont_core::Outcome::Aborted => {
+                                (egui::Color32::from_rgb(150, 120, 40), "hist.outcome.aborted")
+                            }
+                        };
+                        ui.label(RichText::new(self.t(key)).color(color));
+                        ui.label(format!("{:.1}", e.seconds));
+                        match &e.report {
+                            Some(p) => {
+                                if ui.button("📂").on_hover_text(p).clicked() {
+                                    to_open = Some(std::path::PathBuf::from(p));
+                                }
+                            }
+                            None => {
+                                ui.label("—");
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        if let Some(p) = to_open {
+            open_result_file(&p);
+        }
+    }
 
     fn help_tab(&mut self, ui: &mut egui::Ui) {
         let full_w = ui.available_width();
@@ -2206,6 +2803,13 @@ impl eframe::App for App {
             if let Ok(handle) = frame.window_handle() {
                 if let RawWindowHandle::Win32(w) = handle.as_raw() {
                     self.hwnd.store(w.hwnd.get(), Ordering::Relaxed);
+                    // Заголовок окна: тёмный/светлый по текущей теме.
+                    let dark = match self.applied_theme {
+                        ThemeMode::Dark => true,
+                        ThemeMode::Light => false,
+                        ThemeMode::System => ctx.style().visuals.dark_mode,
+                    };
+                    winshell::set_dark_title(w.hwnd.get(), dark);
                 }
             }
         }
@@ -2246,6 +2850,55 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        // ---------- Кастомная визуальная тема ----------
+        {
+            let mut style = (*ctx.style()).clone();
+            let visuals = &mut style.visuals;
+            // Акцентный цвет — профессиональный синий
+            let accent = egui::Color32::from_rgb(33, 100, 220);
+            // Мягкие тени и скругления
+            visuals.panel_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(28, 30, 35)
+            } else {
+                egui::Color32::from_rgb(245, 247, 250)
+            };
+            visuals.indent_has_left_vline = true;
+            // Кнопки и интерактивные элементы
+            visuals.widgets.active.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(50, 55, 65)
+            } else {
+                egui::Color32::from_rgb(220, 228, 240)
+            };
+            visuals.widgets.hovered.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(42, 48, 58)
+            } else {
+                egui::Color32::from_rgb(232, 238, 248)
+            };
+            visuals.widgets.inactive.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(38, 40, 46)
+            } else {
+                egui::Color32::from_rgb(248, 249, 251)
+            };
+            visuals.widgets.inactive.fg_stroke.color = if visuals.dark_mode {
+                egui::Color32::from_rgb(200, 205, 215)
+            } else {
+                accent
+            };
+            // Группы (границы)
+            visuals.widgets.open.bg_fill = if visuals.dark_mode {
+                egui::Color32::from_rgb(35, 37, 43)
+            } else {
+                egui::Color32::from_rgb(250, 251, 253)
+            };
+            visuals.extreme_bg_color = if visuals.dark_mode {
+                egui::Color32::from_rgb(20, 22, 27)
+            } else {
+                egui::Color32::from_rgb(238, 242, 248)
+            };
+            // Без этого кастомные цвета оставались объявленными, но не
+            // применялись: стиль копировался и нигде не сохранялся.
+            ctx.set_style(style);
+        }
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             // Одна строка: вкладки слева, «О приложении» — в правом краю.
@@ -2253,17 +2906,48 @@ impl eframe::App for App {
                 let tw = format!("  {}  ", self.t("tab.work"));
                 let ts = format!("  {}  ", self.t("tab.settings"));
                 let tp = format!("  {}  ", self.t("tab.schedule"));
+                let ths = format!("  {}  ", self.t("tab.history"));
                 let th = format!("  {}  ", self.t("tab.help"));
+                // Подсветка активной вкладки
+                let active = match self.top_tab {
+                    TopTab::Work => Some("tab.work"),
+                    TopTab::Settings => Some("tab.settings"),
+                    TopTab::Schedule => Some("tab.schedule"),
+                    TopTab::History => Some("tab.history"),
+                    TopTab::Help => Some("tab.help"),
+                };
                 if self.running {
                     ui.label(RichText::new(tw).weak());
                     ui.label(RichText::new(ts).weak());
                     ui.label(RichText::new(tp).weak());
+                    ui.label(RichText::new(ths).weak());
                     ui.label(RichText::new(th).weak());
                 } else {
-                    ui.selectable_value(&mut self.top_tab, TopTab::Work, tw);
-                    ui.selectable_value(&mut self.top_tab, TopTab::Settings, ts);
-                    ui.selectable_value(&mut self.top_tab, TopTab::Schedule, tp);
-                    ui.selectable_value(&mut self.top_tab, TopTab::Help, th);
+                    // Активная вкладка подсвечивается акцентным цветом
+                    let accent = egui::Color32::from_rgb(33, 100, 220);
+                    let mut draw = |ui: &mut egui::Ui, key: &str, label: String| {
+                        if Some(key) == active {
+                            ui.label(
+                                RichText::new(format!("▎ {}", label))
+                                    .strong()
+                                    .color(accent),
+                            );
+                        } else {
+                            ui.selectable_value(&mut self.top_tab, match key {
+                                "tab.work" => TopTab::Work,
+                                "tab.settings" => TopTab::Settings,
+                                "tab.schedule" => TopTab::Schedule,
+                                "tab.history" => TopTab::History,
+                                "tab.help" => TopTab::Help,
+                                _ => TopTab::Work,
+                            }, label);
+                        }
+                    };
+                    draw(ui, "tab.work", tw.trim().to_string());
+                    draw(ui, "tab.settings", ts.trim().to_string());
+                    draw(ui, "tab.schedule", tp.trim().to_string());
+                    draw(ui, "tab.history", ths.trim().to_string());
+                    draw(ui, "tab.help", th.trim().to_string());
                 }
                 // Правая часть той же строки (right_to_left: первый элемент — правый).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2290,6 +2974,7 @@ impl eframe::App for App {
                 TopTab::Work => self.work_tab(ui),
                 TopTab::Settings => self.settings_tab(ui),
                 TopTab::Schedule => self.schedule_tab(ui),
+                TopTab::History => self.history_tab(ui),
                 TopTab::Help => self.help_tab(ui),
             }
         });
@@ -2350,6 +3035,17 @@ fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, boo
 }
 
 fn main() -> eframe::Result<()> {
+    // Консольный режим (`--cli ...`): выполняем операцию и выходим, окно
+    // не создаётся. Без `--cli` аргументы обрабатывает GUI (контекстное меню).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match remont_core::cli::parse(&args) {
+        Ok(Some(opts)) => std::process::exit(remont_core::cli::run(&opts)),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("{e}\n\n{}", remont_core::cli::HELP);
+            std::process::exit(2);
+        }
+    }
     let (startup_scan, start_hidden) = parse_args();
     // Рабочий каталог — папка приложения (отчёты по умолчанию пишутся рядом).
     if let Ok(exe) = std::env::current_exe() {
@@ -2588,6 +3284,12 @@ mod tests {
     }
 
 
+    /// История — один файл на процесс: тесты, пишущие её, идут по одному.
+    fn history_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Тестовый каталог данных: изолирует тесты от реальных «Документов».
     fn test_data_dir() -> std::path::PathBuf {
         static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -2682,7 +3384,13 @@ mod tests {
     fn all_tabs_render_in_both_languages() {
         let _d = test_data_dir();
         for lang in [Lang::Ru, Lang::En] {
-            for tab in [TopTab::Work, TopTab::Settings, TopTab::Schedule, TopTab::Help] {
+            for tab in [
+                TopTab::Work,
+                TopTab::Settings,
+                TopTab::Schedule,
+                TopTab::History,
+                TopTab::Help,
+            ] {
                 let mut app = App::default();
                 app.ui_config.lang = lang;
                 app.top_tab = tab;
@@ -2704,6 +3412,7 @@ mod tests {
                             TopTab::Work => app.work_tab(ui),
                             TopTab::Settings => app.settings_tab(ui),
                             TopTab::Schedule => app.schedule_tab(ui),
+                            TopTab::History => app.history_tab(ui),
                             TopTab::Help => app.help_tab(ui),
                         });
                     });
@@ -2980,6 +3689,7 @@ mod tests {
             output_dir: "D:\\Reports".to_string(),
             open_result: true,
             check_updates: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: UiConfig = serde_json::from_str(&json).unwrap();
@@ -3507,4 +4217,202 @@ mod tests {
         let rtl = header.find("right_to_left").expect("нет правого выравнивания");
         assert!(rtl < about, "кнопка не прижата к правому краю");
     }
+
+    // ==================== НОВЫЕ ВОЗМОЖНОСТИ ====================
+
+    /// Настройки новых функций сохраняются и читаются из ui.json.
+    #[test]
+    fn new_settings_roundtrip() {
+        let _d = test_data_dir();
+        let cfg = UiConfig {
+            notify: false,
+            delete_mode: remont_core::DeleteMode::Archive,
+            verify_copy: true,
+            check_space: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: UiConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.notify);
+        assert_eq!(back.delete_mode, remont_core::DeleteMode::Archive);
+        assert!(back.verify_copy);
+        assert!(!back.check_space);
+
+        // Старый файл без новых полей читается с безопасными значениями.
+        let old = r#"{"theme":"light","lang":"ru","close_to_tray":true,"report_format":"csv","output_dir":"","open_result":false,"check_updates":true}"#;
+        let back: UiConfig = serde_json::from_str(old).unwrap();
+        assert!(back.notify, "уведомления должны быть включены по умолчанию");
+        assert_eq!(back.delete_mode, remont_core::DeleteMode::Permanent);
+        assert!(!back.verify_copy);
+        assert!(back.check_space);
+    }
+
+    /// Завершение операции пишет историю: режим, пути, итог, длительность.
+    #[test]
+    fn finish_op_writes_history_entry() {
+        let _d = test_data_dir();
+        let _g = history_lock();
+        let _ = remont_core::history::clear();
+        let mut app = App {
+            op_meta: Some(OpMeta {
+                mode: "scan".into(),
+                title: "Сканирование".into(),
+                paths: vec![r"D:\ОПС 1".into()],
+                source: "gui".into(),
+            }),
+            ..Default::default()
+        };
+        app.op_started = Some(std::time::Instant::now() - std::time::Duration::from_millis(1500));
+        app.push_log("Готово: 10 файлов");
+        app.ui_config.notify = false; // уведомление не проверяем в тесте
+
+        app.finish_op();
+
+        let all = remont_core::history::read_all();
+        assert_eq!(all.len(), 1, "запись не создана: {all:?}");
+        let e = &all[0];
+        assert_eq!(e.mode, "scan");
+        assert_eq!(e.title, "Сканирование");
+        assert_eq!(e.paths, vec![r"D:\ОПС 1".to_string()]);
+        assert_eq!(e.outcome, remont_core::Outcome::Ok);
+        assert!(e.seconds >= 1.0, "длительность не записана: {}", e.seconds);
+        assert_eq!(app.history.len(), 1, "история в памяти не обновилась");
+        let _ = remont_core::history::clear();
+    }
+
+    /// Ошибка в журнале помечает запуск как неуспешный.
+    #[test]
+    fn finish_op_marks_failures() {
+        let _d = test_data_dir();
+        let _g = history_lock();
+        let _ = remont_core::history::clear();
+        let mut app = App {
+            op_meta: Some(OpMeta {
+                mode: "copy".into(),
+                title: "Копирование".into(),
+                paths: Vec::new(),
+                source: "schedule".into(),
+            }),
+            ..Default::default()
+        };
+        app.op_started = Some(std::time::Instant::now());
+        app.push_log("Ошибка копирования D:\\a: нет доступа");
+        app.ui_config.notify = false;
+        app.finish_op();
+
+        let all = remont_core::history::read_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].outcome, remont_core::Outcome::Failed);
+        assert_eq!(all[0].source, "schedule");
+        assert!(all[0].errors >= 1);
+        let _ = remont_core::history::clear();
+    }
+
+    /// Операции из расписания и контекстного меню тоже попадают в историю.
+    #[test]
+    fn all_sources_are_tracked() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(
+            code.contains(r#"source: "schedule".into()"#),
+            "расписание не передаёт метаданные операции"
+        );
+        assert!(
+            code.contains(r#"source: "context-menu".into()"#),
+            "контекстное меню не передаёт метаданные"
+        );
+        assert!(
+            code.contains("spawn_op_meta("),
+            "нет запуска операции с метаданными"
+        );
+    }
+
+    /// Вкладка «История» есть в интерфейсе и читает журнал с диска.
+    #[test]
+    fn history_tab_is_wired() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("TopTab::History"));
+        assert!(code.contains("fn history_tab"));
+        assert!(code.contains("remont_core::history::read_all()"));
+        assert!(code.contains("history::export_csv"));
+        assert!(code.contains("fn reload_history"));
+    }
+
+    /// Настройка уведомлений управляет показом: при выключении notify не
+    /// вызывается, при включении — вызывается с итогом операции.
+    #[test]
+    fn notifications_follow_setting() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("fn finish_op").expect("нет finish_op");
+        let block = &code[start..start + code[start..].find("\n    fn reload_history").unwrap_or(3000)];
+        assert!(block.contains("if self.ui_config.notify"));
+        assert!(block.contains("notify::notify("));
+        // Текст уведомления различает успех, ошибку и остановку.
+        for key in ["notify.done", "notify.error", "notify.aborted"] {
+            assert!(block.contains(key), "нет уведомления {key}");
+        }
+    }
+
+    /// Тёмный заголовок окна применяется при смене темы и при получении hwnd.
+    #[test]
+    fn dark_title_follows_theme() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("winshell::set_dark_title"), "заголовок не настраивается");
+        assert!(
+            code.matches("winshell::set_dark_title").count() >= 2,
+            "тема заголовка не применяется при старте окна и при переключении"
+        );
+        // На не-Windows вызов безопасен.
+        winshell::set_dark_title(0, true);
+    }
+
+    /// Консольный режим включён в точку входа: `--cli` выполняет операцию
+    /// без окна, ошибка аргументов даёт код 2.
+    #[test]
+    fn cli_is_wired_into_main() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("remont_core::cli::parse"));
+        assert!(code.contains("remont_core::cli::run"));
+        assert!(code.contains("std::process::exit(2)"), "нет кода ошибки аргументов");
+    }
+
+    /// Режим «Сравнение» содержит сравнение отчётов (два файла + запуск).
+    #[test]
+    fn report_diff_ui_exists() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("fn start_diff"));
+        assert!(code.contains(r#"self.t("cmp.reports")"#));
+        assert!(code.contains("report_diff::diff_reports"));
+        assert!(code.contains("diff_old") && code.contains("diff_new"));
+    }
+
+    /// Способ удаления из настроек доходит до операции.
+    #[test]
+    fn delete_mode_is_passed_to_core() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("delete_paths_opts"));
+        assert!(code.contains("let mode = self.ui_config.delete_mode"));
+        assert!(
+            code.contains("DeleteMode::ALL"),
+            "в настройках нет выбора способа удаления"
+        );
+    }
+
+    /// Проверки копирования (сверка и место) передаются в ядро.
+    #[test]
+    fn copy_options_are_passed() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("CopyOptions {"));
+        assert!(code.contains("verify: self.ui_config.verify_copy"));
+        assert!(code.contains("check_space: self.ui_config.check_space"));
+        assert!(code.contains("copy_files_from_list_opts"));
+    }
+
 }

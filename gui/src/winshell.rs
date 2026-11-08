@@ -21,6 +21,43 @@ pub const MENU_CAPTION_RU: &str = "Просканировать папку в Re
 /// Подпись пункта меню на английском языке.
 pub const MENU_CAPTION_EN: &str = "Scan with RemontExplorer";
 
+/// Тёмный заголовок окна под тёмную тему.
+///
+/// Заголовок окна рисует Windows, а не egui: без этого вызова тёмная тема
+/// приложения соседствует со светлой полосой заголовка. Атрибут появился в
+/// Windows 10 1809 (сборка 17763); на старых системах вызов просто ничего
+/// не меняет — поэтому ошибка игнорируется.
+#[cfg(windows)]
+pub fn set_dark_title(hwnd: isize, dark: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+
+    if hwnd == 0 {
+        return;
+    }
+    let value: i32 = i32::from(dark);
+    // SAFETY: окно валидно (получено от eframe), атрибут — целое число,
+    // размер передан точно.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd as *mut core::ffi::c_void,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &value as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        // Для Windows 10 до 20H1 атрибут назывался по номеру 19.
+        DwmSetWindowAttribute(
+            hwnd as *mut core::ffi::c_void,
+            19u32,
+            &value as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+/// Вне Windows заголовок окна не настраивается.
+#[cfg(not(windows))]
+pub fn set_dark_title(_hwnd: isize, _dark: bool) {}
+
 /// Подпись пункта меню для выбранного языка.
 pub fn menu_caption(russian: bool) -> &'static str {
     if russian {

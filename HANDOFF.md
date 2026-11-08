@@ -286,12 +286,45 @@ Windows этого не требуется; запасной Atom-канал з�
 - Тесты: `default_report_path_is_absolute` (ядро: путь абсолютный, кириллица сохраняется)
   и `result_file_opens_without_cmd` (GUI: ShellExecute + canonicalize, без `cmd`).
 
+### 3.15. Новые возможности 2.1.0
+Реализовано (по списку замечаний):
+
+| Возможность | Где | Как проверено |
+|---|---|---|
+| История выполнений | `core/src/history.rs`, вкладка «История» | `history::tests::*`, `finish_op_writes_history_entry`, `all_sources_are_tracked` |
+| Сравнение с прошлым отчётом | `core/src/report_diff.rs`, режим «Сравнение» | `report_diff::tests::*` (в т.ч. чтение XLSX), `cli_mode::diff_reports_from_cli_creates_file` |
+| Уведомления Windows + вкл/выкл | `gui/src/notify.rs`, настройка `notify` | `notifications_follow_setting` |
+| Удаление в корзину / архив | `core/src/recycle.rs`, `DeleteMode` | `delete_modes.rs` (архив, отказ при сбое архива) |
+| Сверка копий по SHA-256 | `copy::CopyOptions`, `CopyReport` | `copy_checks.rs` |
+| Свободное место | `core/src/disk.rs` (копирование, архивация) | `copy_checks.rs`, `delete_modes.rs` |
+| CLI-режим | `core/src/cli.rs`, `main()` | `cli_mode.rs` + ручные прогоны |
+| Тёмный заголовок окна | `winshell::set_dark_title` (DWM) | `dark_title_follows_theme` |
+
+**Ключевые решения.**
+- Журнал — JSON Lines в `Документы\RemontExplorer\logs\history.jsonl`: дописывание не
+  переписывает прошлое, битая последняя строка не ломает чтение.
+- История пишется по завершении в `App::finish_op`; источник (`gui`/`schedule`/`context-menu`/`cli`)
+  передаётся через `OpMeta`. Ошибки определяются по строкам журнала (`logfmt::is_error`).
+- Сравнение отчётов читает и CSV, и XLSX. XLSX разбирается собственным минимальным
+  парсером (zip + quick-xml, `xl/sharedStrings.xml` + первый лист) — без тяжёлых библиотек.
+  Колонки берутся по атрибуту `r` ячейки, иначе пустые ячейки сдвигают данные.
+- Если у отчётов разные корни, сравниваются относительные пути.
+- Корзина — `SHFileOperationW` + `FOF_ALLOWUNDO` (Unicode, работает с папками).
+  Пути длиннее 259 символов корзина не принимает — возвращается ошибка, удаление не идёт.
+- Архив перед удалением: при ошибке создания архива **удаление отменяется** (данные целы).
+- Свободное место: 5% запаса; неизвестное место (сетевой путь) не блокирует операцию.
+- CLI: `--cli` обязателен, иначе `--scan` из контекстного меню по-прежнему открывает окно.
+  Вывод не падает при обрыве канала (`outln!` макрос).
+- Тёмный заголовок: `DWMWA_USE_IMMERSIVE_DARK_MODE` (20) и запасной 19 для старых сборок Win10.
+
+**Версия:** 2.1.0. На GitHub **не публиковалась** — сначала ручная проверка пользователем.
+
 ## 4. Состояние проверок (на момент передачи)
 
 | Проверка | Результат |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | **60 тестов, 0 провалов**: 35 GUI-unit + интеграционные наборы + i18n_smoke + xlsx_output |
+| `cargo test --workspace` | **125 тестов, 0 провалов**: 35 GUI-unit + интеграционные наборы + i18n_smoke + xlsx_output |
 | `cargo clippy --workspace --all-targets` | 0 warnings |
 | `cargo run --example e2e_smoke` | «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ (7 режимов)» |
 | `cargo run --example probe_modal` | 412×117 (компактно) |

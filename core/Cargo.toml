@@ -11,6 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono.workspace = true
+dirs.workspace = true
+quick-xml = "0.41"
 csv.workspace = true
 encoding_rs.workspace = true
 filetime.workspace = true
@@ -26,3 +28,9 @@ rust_xlsxwriter.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

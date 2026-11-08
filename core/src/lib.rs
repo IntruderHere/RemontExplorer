@@ -7,17 +7,23 @@
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
 pub mod cleanup;
+pub mod cli;
 pub mod compare;
 pub mod config;
 pub mod copy;
 pub mod create;
 pub mod delete;
+pub mod disk;
 pub mod duplicates;
 pub mod error;
 pub mod hashing;
+pub mod history;
 pub mod i18n;
 pub mod netcheck;
+pub mod paths;
 pub mod pathutil;
+pub mod recycle;
+pub mod report_diff;
 pub mod scan;
 pub mod stop;
 pub mod xlsx;
@@ -29,12 +35,13 @@ pub use compare::{compare_folders, CompareMethod};
 pub use config::{read_pairs_csv, read_paths_file, Pair};
 pub use copy::copy_files_from_list;
 pub use create::{archive_folders, create_folders};
-pub use delete::{delete_paths, DeleteStats};
+pub use delete::{delete_paths, delete_paths_opts, DeleteMode, DeleteStats};
 pub use duplicates::find_duplicates_multi;
 pub use error::CoreError;
 pub use hashing::HashAlgo;
 pub use i18n::{global, set_global, tr, Lang};
 pub use scan::{scan_folder, ScanStats};
+pub use history::{HistoryEntry, Outcome};
 pub use xlsx::csv_to_xlsx;
 pub use stop::StopToken;
 
@@ -232,4 +239,13 @@ pub fn stdout_sink() -> LogSink {
         |msg: String| println!("{msg}"),
         |c: usize, t: usize| eprintln!("[PROGRESS {c}/{t}]"),
     )))
+}
+
+/// Блокировка для тестов, меняющих переменные окружения: `std::env` общий на
+/// весь процесс, поэтому параллельные тесты перетирают друг другу каталог
+/// данных. Все такие тесты обязаны брать этот мьютекс.
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

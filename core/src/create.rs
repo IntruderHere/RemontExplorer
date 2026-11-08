@@ -109,6 +109,22 @@ pub fn archive_folders(
     let zip_path = PathBuf::from(&zip_name);
     em!(log, "zip_start", zip_name);
 
+    // Свободное место: архив пишется рядом с приложением (или в папке
+    // результатов), и его объём сопоставим с суммой исходных папок.
+    let need_bytes = crate::disk::total_size(folders);
+    if let Some(parent) = zip_path.parent() {
+        if let Err((need, free)) = crate::disk::check_space(need_bytes, parent) {
+            em!(
+                log,
+                "copy_space_fail",
+                parent.display(),
+                crate::disk::human(need),
+                crate::disk::human(free)
+            );
+            return None;
+        }
+    }
+
     let resolved: Vec<PathBuf> = folders.iter().filter_map(|p| p.canonicalize().ok()).collect();
     let common = common_base(&resolved);
     em!(log, "zip_root", common.display());
