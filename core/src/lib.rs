@@ -90,7 +90,7 @@ pub fn finalize_report_logged(
         remember_report(&csv);
         return csv;
     }
-    let xlsx = csv.with_extension("xlsx");
+    let xlsx = unique_path(csv.with_extension("xlsx"));
     match xlsx::csv_to_xlsx(&csv, &xlsx) {
         Ok(()) => {
             let _ = std::fs::remove_file(&csv);
@@ -135,7 +135,7 @@ pub fn output_dir() -> Option<std::path::PathBuf> {
 /// Полный путь для файла отчёта: имя кладётся в папку результатов.
 /// Каталог создаётся, если его ещё нет.
 pub fn resolve_report_path(name: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    match output_dir() {
+    let path = match output_dir() {
         Some(dir) => {
             let _ = std::fs::create_dir_all(&dir);
             dir.join(name)
@@ -146,7 +146,37 @@ pub fn resolve_report_path(name: impl AsRef<std::path::Path>) -> std::path::Path
         None => std::env::current_dir()
             .map(|cwd| cwd.join(name.as_ref()))
             .unwrap_or_else(|_| std::path::PathBuf::from(name.as_ref())),
+    };
+    // Два запуска в одну секунду дают одинаковое имя отчёта — второй
+    // затирал первый. Дубли добавляем суффиксом _2, _3…
+    unique_path(path)
+}
+
+/// Свободное имя рядом с указанным: при совпадении добавляется `_2`, `_3`…
+pub fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if !path.exists() {
+        return path;
     }
+    let parent = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    for n in 2..10_000u32 {
+        let name = match &ext {
+            Some(e) => format!("{stem}_{n}.{e}"),
+            None => format!("{stem}_{n}"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
 }
 
 /// Путь последнего созданного отчёта — GUI использует его, чтобы открыть

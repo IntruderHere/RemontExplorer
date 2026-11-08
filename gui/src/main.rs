@@ -3369,6 +3369,13 @@ mod tests {
     }
 
 
+    /// Расписание — один файл schedule.json на процесс: тесты, которые его
+    /// читают или пишут, выполняются по одному.
+    fn schedule_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// История — один файл на процесс: тесты, пишущие её, идут по одному.
     fn history_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3526,6 +3533,7 @@ mod tests {
     #[test]
     fn scheduler_executes_task_end_to_end() {
         let _d = test_data_dir();
+        let _sched = schedule_lock();
         let _lock = cwd_lock();
         let old = std::env::current_dir().unwrap();
         let tmp = std::env::temp_dir().join(format!("fm_sched_e2e_{}", std::process::id()));
@@ -3837,6 +3845,7 @@ mod tests {
     #[test]
     fn scheduler_runs_each_mode() {
         let _d = test_data_dir();
+        let _sched = schedule_lock();
         let _lock = cwd_lock();
         let old = std::env::current_dir().unwrap();
         let tmp = std::env::temp_dir().join(format!("fm_sched_modes_{}", std::process::id()));
@@ -3974,6 +3983,7 @@ mod tests {
     #[test]
     fn scheduler_tick_fires_once_per_day() {
         let _d = test_data_dir();
+        let _sched = schedule_lock();
         let _lock = cwd_lock();
         use chrono::Timelike;
         let old = std::env::current_dir().unwrap();
@@ -4011,6 +4021,17 @@ mod tests {
         assert!(app.running, "задание не сработало по расписанию");
         wait_op(&mut app, 30);
         assert_eq!(app.sched.tasks[0].remaining, 1, "выполнение не списано");
+
+        // Главное: задание не просто «стартовало», а создало отчёт.
+        let reports: Vec<_> = fs::read_dir(&out)
+            .expect("нет папки результата")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("BATCH_SCAN_"))
+            .collect();
+        assert_eq!(reports.len(), 1, "по расписанию не создан отчёт: {reports:?}");
+        let body = fs::read_to_string(out.join(&reports[0])).unwrap();
+        assert!(body.contains("f.txt"), "в отчёте нет файла источника: {body}");
         assert_eq!(
             app.sched.tasks[0].last_date,
             chrono::Local::now().format("%Y-%m-%d").to_string(),
@@ -4041,7 +4062,10 @@ mod tests {
     #[test]
     fn scheduler_does_not_start_while_busy() {
         let _d = test_data_dir();
+        let _sched = schedule_lock();
         use chrono::Timelike;
+        // В общем тестовом каталоге могли остаться задания других тестов.
+        let _ = fs::remove_file(config_path("schedule.json"));
         let mut app = App::default();
         let now = chrono::Local::now();
         let mut t = schedule::Task::new(1, "scan", now.hour() as u8, now.minute() as u8, 1);
@@ -4826,6 +4850,150 @@ mod tests {
         let block = tail_of(code, e, 2500);
         assert!(!block.contains("f32::INFINITY"), "поле ввода снова растягивается за край");
         assert!(block.contains("ui.horizontal_wrapped"), "кнопки не переносятся");
+    }
+
+
+    /// Кнопки «Сохранить в файл» и «Загрузить из файла» в настройках
+    /// действительно пишут и читают конфиг (пары «откуда;куда»).
+    #[test]
+    fn editor_save_and_load_roundtrip() {
+        let _d = test_data_dir();
+        let _lock = cwd_lock();
+        let tmp = std::env::temp_dir().join(format!("fm_editor_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        let _guard = CwdGuard(old);
+
+        let mut app = App::default();
+        // Режим «Копирование» — парный редактор.
+        let idx = MODES.iter().position(|d| d.mode == Mode::Copy).unwrap();
+        app.settings_sel = idx;
+        app.settings_loaded = usize::MAX;
+        app.editor_left = "D:\\src\\a.txt\nD:\\src\\b.txt".into();
+        app.editor_right = "D:\\dst\\a.txt\nD:\\dst\\b.txt".into();
+        app.save_pair_config(true);
+
+        let cfg = config_path("from_to.csv");
+        let body = fs::read_to_string(&cfg).expect("конфиг не сохранён");
+        assert!(body.contains("a.txt"), "нет первой пары: {body}");
+        assert!(body.contains("b.txt"), "нет второй пары: {body}");
+        assert_eq!(body.lines().count(), 2, "строк должно быть 2: {body}");
+
+        // Чтение обратно — тем же путём, что и кнопка «Загрузить из файла».
+        let (l, r) = load_pair_file(&cfg);
+        assert_eq!(l.trim(), app.editor_left);
+        assert_eq!(r.trim(), app.editor_right);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Одиночный редактор: сохранение списка путей и чтение обратно.
+    #[test]
+    fn single_editor_save_roundtrip() {
+        let _d = test_data_dir();
+        let _lock = cwd_lock();
+        let tmp = std::env::temp_dir().join(format!("fm_editor1_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = config_path("folders_to_delete.txt");
+        let text = "D:\\one\nD:\\two\n";
+        save_text_file(&cfg, text).expect("не сохранено");
+        assert_eq!(load_text_file(&cfg).trim(), "D:\\one\nD:\\two");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+
+    /// Кнопка «Остановить» гасит запущенную операцию, и следующая запускается
+    /// заново (стоп-флаг сбрасывается).
+    #[test]
+    fn stop_button_halts_operation() {
+        let _d = test_data_dir();
+        let _lock = cwd_lock();
+        let tmp = std::env::temp_dir().join(format!("fm_stop_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        // Много файлов: операция должна идти достаточно долго.
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for i in 0..4000 {
+            fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        let _guard = CwdGuard(old);
+
+        let mut app = App {
+            mode: Some(Mode::Scan),
+            scan_threads: 1,
+            ..Default::default()
+        };
+        let p = src.clone();
+        app.spawn_op(move |log, stop| {
+            let _ = scan_folder(&p, None, 1, &stop, &log);
+        });
+        assert!(app.running, "операция не стартовала");
+
+        // Нажатие «Остановить».
+        app.stop.stop();
+        let began = std::time::Instant::now();
+        while app.running && began.elapsed() < std::time::Duration::from_secs(40) {
+            app.poll_logs();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.poll_logs();
+        assert!(!app.running, "операция не остановилась");
+
+        // Флаг сбрасывается при следующем запуске (а не сразу после остановки):
+        // иначе новая операция моментально завершилась бы.
+        let p2 = src.clone();
+        app.spawn_op(move |log, stop| {
+            let _ = scan_folder(&p2, None, 2, &stop, &log);
+        });
+        assert!(app.running, "после остановки новая операция не запускается");
+        assert!(!app.stop.is_set(), "стоп-флаг не сброшен при новом запуске");
+        wait_op(&mut app, 60);
+        assert!(!app.running);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Добавление путей в редактор: пустой → первый, далее — с новой строки.
+    #[test]
+    fn append_path_appends_lines() {
+        let mut s = String::new();
+        App::append_path(&mut s, "D:\\one");
+        assert_eq!(s, "D:\\one");
+        App::append_path(&mut s, "D:\\two");
+        assert_eq!(s, "D:\\one\nD:\\two");
+    }
+
+    /// Задания планировщика сохраняются и читаются (добавление/удаление
+    /// через интерфейс идут через этот файл).
+    #[test]
+    fn schedule_persists_tasks() {
+        let _d = test_data_dir();
+        let _sched = schedule_lock();
+        let dir = config_path("schedule.json");
+        let _ = fs::remove_file(&dir);
+
+        let mut sc = schedule::Schedule::default();
+        let mut t = schedule::Task::new(7, "copy", 3, 15, 5);
+        t.output_dir = "D:\\out".into();
+        sc.tasks.push(t);
+        sc.save();
+
+        let back = schedule::Schedule::load();
+        assert_eq!(back.tasks.len(), 1, "задание не сохранилось");
+        assert_eq!(back.tasks[0].mode, "copy");
+        assert_eq!(back.tasks[0].hour, 3);
+        assert_eq!(back.tasks[0].minute, 15);
+        assert_eq!(back.tasks[0].remaining, 5);
+        assert_eq!(back.tasks[0].output_dir, "D:\\out");
+
+        let _ = fs::remove_file(&dir);
     }
 
 }
