@@ -255,4 +255,14 @@ mod tests {
         assert_eq!(parse("abc"), (0, 0, 0));
         assert_eq!(parse("2.1.3-beta.1"), (2, 1, 3));
     }
+    /// Тег релиза `v2.4` и версия сборки `2.4.0` — одна и та же версия:
+    /// иначе приложение предлагало бы обновиться само на себя.
+    #[test]
+    fn release_tag_v24_equals_version_2_4_0() {
+        assert!(!is_newer("2.4", "2.4.0"));
+        assert!(!is_newer("v2.4", "2.4.0"));
+        assert!(!is_newer("2.4.0", "2.4"));
+        assert!(is_newer("2.4.1", "2.4.0"));
+    }
+
 }
