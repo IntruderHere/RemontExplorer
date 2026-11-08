@@ -580,6 +580,8 @@ struct App {
     startup_scan: Option<PathBuf>,
     /// Запуск свёрнутым в трей (`--minimized`, автозапуск).
     start_hidden: bool,
+    /// Вкладка, открытая при старте (`--tab ...`).
+    startup_tab: Option<TopTab>,
     /// Стартовые действия выполнены (один раз).
     startup_done: bool,
     /// Найденное обновление (версия новее текущей).
@@ -655,6 +657,7 @@ impl Default for App {
             exit_requested: false,
             startup_scan: None,
             start_hidden: false,
+            startup_tab: None,
             startup_done: false,
             op_meta: None,
             op_started: None,
@@ -796,6 +799,9 @@ impl App {
             return;
         }
         self.startup_done = true;
+        if let Some(tab) = self.startup_tab.take() {
+            self.top_tab = tab;
+        }
         if let Some(dir) = self.startup_scan.take() {
             self.scan_external(dir);
         }
@@ -1944,17 +1950,6 @@ impl App {
             ui.checkbox(&mut self.ui_config.open_result, &l_open_result);
             ui.checkbox(&mut self.ui_config.notify, &l_notify);
 
-            // Способ удаления: безвозвратно / корзина / архив.
-            ui.horizontal(|ui| {
-                ui.label(&l_delete_mode);
-                for m in remont_core::DeleteMode::ALL {
-                    ui.selectable_value(
-                        &mut self.ui_config.delete_mode,
-                        m,
-                        m.label(self.ui_config.lang),
-                    );
-                }
-            });
 
             ui.checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
             ui.checkbox(&mut self.ui_config.check_space, &l_check_space);
@@ -1969,6 +1964,18 @@ impl App {
             }
             ui.add_enabled_ui(!self.ui_config.auto_install, |ui| {
                 ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
+            });
+
+            // Способ удаления: безвозвратно / корзина / архив.
+            ui.horizontal(|ui| {
+                ui.label(&l_delete_mode);
+                for m in remont_core::DeleteMode::ALL {
+                    ui.selectable_value(
+                        &mut self.ui_config.delete_mode,
+                        m,
+                        m.label(self.ui_config.lang),
+                    );
+                }
             });
 
             if is_win {
@@ -3250,17 +3257,30 @@ fn migrate_legacy_config(target: &Path) {
 /// Аргументы командной строки.
 /// `--scan "D:\\Папка"` — сразу просканировать папку (вызывается из
 /// контекстного меню Проводника), `--minimized` — стартовать в трее.
-fn parse_args() -> (Option<PathBuf>, bool) {
+fn parse_args() -> (Option<PathBuf>, bool, Option<TopTab>) {
     parse_args_from(std::env::args().skip(1))
 }
 
 /// Разбор аргументов (отдельно от `env::args`, чтобы покрыть тестами).
-fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, bool) {
+fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, bool, Option<TopTab>) {
     let mut scan = None;
     let mut minimized = false;
+    let mut tab = None;
     let mut args = args;
     while let Some(a) = args.next() {
         match a.as_str() {
+            // Открыть приложение сразу на нужной вкладке:
+            // `--tab settings|schedule|history|help|work`.
+            "--tab" => {
+                tab = args.next().and_then(|v| match v.trim().to_lowercase().as_str() {
+                    "work" | "работа" => Some(TopTab::Work),
+                    "settings" | "настройки" => Some(TopTab::Settings),
+                    "schedule" | "планирование" => Some(TopTab::Schedule),
+                    "history" | "история" => Some(TopTab::History),
+                    "help" | "справка" => Some(TopTab::Help),
+                    _ => None,
+                });
+            }
             "--scan" => {
                 if let Some(p) = args.next() {
                     let p = p.trim_matches('"').to_string();
@@ -3273,7 +3293,7 @@ fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, boo
             _ => {}
         }
     }
-    (scan, minimized)
+    (scan, minimized, tab)
 }
 
 /// Подключиться к консоли родительского процесса.
@@ -3345,18 +3365,25 @@ fn main() -> eframe::Result<()> {
     // Консольный режим (`--cli ...`): выполняем операцию и выходим, окно
     // не создаётся. Без `--cli` аргументы обрабатывает GUI (контекстное меню).
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--cli") {
-        attach_parent_console();
-    }
-    match remont_core::cli::parse(&args) {
-        Ok(Some(opts)) => std::process::exit(remont_core::cli::run(&opts)),
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!("{e}\n\n{}", remont_core::cli::HELP);
-            std::process::exit(2);
+    // Консольный разбор запускается только при --cli/--help: иначе параметры
+    // окна (`--tab settings`, `--minimized`) считались бы ошибкой CLI.
+    let wants_cli = args
+        .iter()
+        .any(|a| a == "--cli" || a == "--help" || a == "-h");
+    if wants_cli {
+        if args.iter().any(|a| a == "--cli") {
+            attach_parent_console();
+        }
+        match remont_core::cli::parse(&args) {
+            Ok(Some(opts)) => std::process::exit(remont_core::cli::run(&opts)),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("{e}\n\n{}", remont_core::cli::HELP);
+                std::process::exit(2);
+            }
         }
     }
-    let (startup_scan, start_hidden) = parse_args();
+    let (startup_scan, start_hidden, startup_tab) = parse_args();
     // Рабочий каталог — папка приложения (отчёты по умолчанию пишутся рядом).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -3392,7 +3419,8 @@ fn main() -> eframe::Result<()> {
             apply_output_dir(&cfg.output_dir);
             let mut app = App {
                 startup_scan: startup_scan.clone(),
-                start_hidden,..Default::default()
+                start_hidden,
+                startup_tab,..Default::default()
             };
             // Проверка: папка приложения доступна для записи (конфиги, отчёты,
             // архивы пишутся рядом с exe). Если нет — предупреждение в консоли.
@@ -3577,8 +3605,16 @@ mod tests {
     fn ui_strings_are_translated() {
         let src = include_str!("main.rs");
         let code = src.split("#[cfg(test)]").next().unwrap();
-        // Допустимые исключения: самоназвание языка в переключателе.
-        let allowed = ["Русский"];
+        // Допустимые исключения: самоназвание языка в переключателе и
+        // русские алиасы аргумента `--tab` (это не тексты интерфейса).
+        let allowed = [
+            "Русский",
+            "работа",
+            "настройки",
+            "планирование",
+            "история",
+            "справка",
+        ];
         let mut bad = Vec::new();
         for (n, line) in code.lines().enumerate() {
             if line.trim_start().starts_with("//") || line.trim_start().starts_with("//!") {
@@ -3986,28 +4022,28 @@ mod tests {
     /// Разбор командной строки (вызов из контекстного меню Проводника).
     #[test]
     fn parses_command_line() {
-        let (scan, min) = parse_args_from(
+        let (scan, min, _tab) = parse_args_from(
             vec!["--scan".to_string(), "\"D:\\Data\\Temp\"".to_string()].into_iter(),
         );
         assert_eq!(scan, Some(PathBuf::from("D:\\Data\\Temp")), "кавычки не сняты");
         assert!(!min);
 
-        let (scan, min) = parse_args_from(vec!["--minimized".to_string()].into_iter());
+        let (scan, min, _tab) = parse_args_from(vec!["--minimized".to_string()].into_iter());
         assert_eq!(scan, None);
         assert!(min);
 
-        let (scan, _) = parse_args_from(
+        let (scan, _, _tab) = parse_args_from(
             vec!["--scan".to_string(), "D:\\Папка с пробелом".to_string()].into_iter(),
         );
         assert_eq!(scan, Some(PathBuf::from("D:\\Папка с пробелом")));
 
         // Без аргументов — обычный запуск.
-        let (scan, min) = parse_args_from(vec!["что-то".to_string()].into_iter());
+        let (scan, min, _tab) = parse_args_from(vec!["что-то".to_string()].into_iter());
         assert_eq!(scan, None);
         assert!(!min);
 
         // Ключ без значения не должен ломать запуск.
-        let (scan, _) = parse_args_from(vec!["--scan".to_string()].into_iter());
+        let (scan, _, _tab) = parse_args_from(vec!["--scan".to_string()].into_iter());
         assert_eq!(scan, None);
     }
 

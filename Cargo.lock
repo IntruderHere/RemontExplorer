@@ -3414,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "remont-core"
-version = "2.3.1"
+version = "2.3.2"
 dependencies = [
  "chrono",
  "csv",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "remont-gui"
-version = "2.3.1"
+version = "2.3.2"
 dependencies = [
  "chrono",
  "dirs",
