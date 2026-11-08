@@ -1008,7 +1008,10 @@ impl App {
                                     RichText::new(self.tf("upd.error", std::slice::from_ref(err))).weak().color(egui::Color32::from_rgb(180, 60, 60)),
                                 );
                             } else if self.update_done {
-                                ui.label(RichText::new(self.t("upd.latest")).weak());
+                                // Текущая версия в скобках: видно, что именно стоит.
+                                let cur = env!("CARGO_PKG_VERSION");
+                                let msg = self.tf("upd.latest", &[cur.to_string()]);
+                                ui.label(RichText::new(msg).weak());
                             }
 
                             ui.add_space(12.0);
@@ -5534,6 +5537,18 @@ mod tests {
         assert!(code.contains("include_dirs: self.ui_config.scan_dirs"));
         let old: UiConfig = serde_json::from_str(r#"{"theme":"system","lang":"ru"}"#).unwrap();
         assert!(!old.scan_dirs, "старый конфиг читается как «только файлы»");
+    }
+
+
+    /// «Установлена последняя версия» показывает номер — иначе непонятно, что стоит.
+    #[test]
+    fn latest_version_message_includes_number() {
+        let ru = i18n::t(Lang::Ru, "upd.latest");
+        let en = i18n::t(Lang::En, "upd.latest");
+        assert!(ru.contains("последняя версия") && ru.contains("{}"));
+        assert!(en.contains("latest version") && en.contains("{}"));
+        let msg = tfg("upd.latest", &["2.4".to_string()]);
+        assert_eq!(msg, "Установлена последняя версия (2.4)");
     }
 
 }
