@@ -1972,7 +1972,8 @@ impl App {
             });
 
             if is_win {
-                ui.add_space(4.0);
+                // Все флажки идут одним списком, без отбивки и разделителей:
+                // иначе казалось, что блок разбит на части.
                 // Все три пункта — одинаковые флажки: без статус-точек и
                 // разных отступов (пользователь просил один тип).
                 let mut menu_on = self.ctx_menu.unwrap_or(false);
@@ -5271,6 +5272,21 @@ mod tests {
             "https://github.com/IntruderHere/RemontExplorer/releases/download/v2.3.0/RemontExplorer-windows-x64.zip"
         );
         assert_eq!(asset_url_for("v2.3.0"), asset_url_for("2.3.0"));
+    }
+
+
+    /// Флажки в настройках идут одним списком: между блоками нет отбивки,
+    /// из-за которой казалось, что настройки разделены.
+    #[test]
+    fn checkboxes_are_not_split_by_spacing() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("if is_win {").expect("нет блока Windows");
+        let block = &code[start..start + 260];
+        assert!(
+            !block.contains("ui.add_space("),
+            "перед флажками Windows осталась отбивка"
+        );
     }
 
 }
