@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use egui::{FontId, RichText, ScrollArea, TextEdit};
 use remont_core::i18n::Lang;
 use remont_core::OutputFormat;
-use remont_core::{
+use remont_core::{scan_folder_opts, 
     archive_folders, cleanup_empty_folders, compare_folders, copy_files_from_list, create_folders,
     delete_paths, emit, find_duplicates_multi, read_paths_file, scan_folder, set_global,
     CompareMethod, HashAlgo, LogSink, Sink, StopToken,
@@ -88,6 +88,9 @@ struct UiConfig {
     /// Не требует прав администратора.
     #[serde(default = "default_true")]
     long_paths: bool,
+    /// Сканирование: писать в отчёт и папки (включая пустые), а не только файлы.
+    #[serde(default)]
+    scan_dirs: bool,
 }
 
 impl Default for UiConfig {
@@ -107,6 +110,7 @@ impl Default for UiConfig {
             verify_copy: false,
             check_space: true,
             long_paths: true,
+            scan_dirs: false,
         }
     }
 }
@@ -797,6 +801,9 @@ impl App {
     /// Сканирование папки, переданной в командной строке.
     fn scan_external(&mut self, dir: PathBuf) {
         let threads = self.scan_threads;
+        let opts = remont_core::ScanOptions {
+            include_dirs: self.ui_config.scan_dirs,
+        };
         self.mode = Some(Mode::Scan);
         self.push_log(&self.tf("log.external_scan", &[dir.display().to_string()]));
         let meta = OpMeta {
@@ -806,7 +813,7 @@ impl App {
             source: "context-menu".into(),
         };
         self.spawn_op_meta(meta, move |log, stop| {
-            match scan_folder(&dir, None, threads, &stop, &log) {
+            match scan_folder_opts(&dir, None, threads, &stop, &log, &opts) {
                 Some((out, stats)) => emit(
                     &log,
                     tfg(
@@ -1693,8 +1700,11 @@ impl App {
                         Some(p) => {
                             let p2 = p;
                             let threads = self.scan_threads;
+                            let opts = remont_core::ScanOptions {
+                                include_dirs: self.ui_config.scan_dirs,
+                            };
                             self.spawn_op(move |log, stop| {
-                                match scan_folder(&p2, None, threads, &stop, &log) {
+                                match scan_folder_opts(&p2, None, threads, &stop, &log, &opts) {
                                     Some((out, stats)) => emit(
                                         &log,
                                         tfg("log.scan_result", &[stats.files.to_string(), out.display().to_string()]),
@@ -1708,13 +1718,16 @@ impl App {
                 } else {
                     let master = format!("BATCH_SCAN_{}.csv", timestamp());
                     let threads = self.scan_threads;
+                    let opts = remont_core::ScanOptions {
+                        include_dirs: self.ui_config.scan_dirs,
+                    };
                     self.spawn_op(move |log, stop| {
                         emit(&log, tfg("log.scan_batch", std::slice::from_ref(&master)));
                         for p in &paths {
                             if stop.is_set() {
                                 break;
                             }
-                            scan_folder(p, Some(Path::new(&master)), threads, &stop, &log);
+                            scan_folder_opts(p, Some(Path::new(&master)), threads, &stop, &log, &opts);
                         }
                         // Пакетный файл конвертируется один раз — после всех папок.
                         let master = remont_core::finalize_report(PathBuf::from(&master)).display().to_string();
@@ -1941,6 +1954,9 @@ impl App {
         let l_verify_copy = self.t("ui.verify_copy").to_string();
         let l_check_space = self.t("ui.check_space").to_string();
         let l_long_paths = self.t("ui.long_paths").to_string();
+        let l_scan_scope = self.t("ui.scan_scope").to_string();
+        let l_scan_files = self.t("ui.scan_scope_files").to_string();
+        let l_scan_all = self.t("ui.scan_scope_all").to_string();
         let l_menu = self.tf("win.ctx_menu", &[winshell::menu_caption(self.ui_config.lang == Lang::Ru).to_string()]);
         let l_auto = self.t("win.autostart").to_string();
         let l_tray = self.t("win.tray").to_string();
@@ -2011,6 +2027,13 @@ impl App {
                 cols[1].add_enabled_ui(!self.ui_config.auto_install, |ui| {
                     ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
                 });
+            });
+
+            // Что попадает в отчёт сканирования: только файлы или ещё и папки.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(&l_scan_scope);
+                ui.selectable_value(&mut self.ui_config.scan_dirs, false, &l_scan_files);
+                ui.selectable_value(&mut self.ui_config.scan_dirs, true, &l_scan_all);
             });
 
             if is_win {
@@ -5495,6 +5518,22 @@ mod tests {
             i18n::t(Lang::En, "ui.long_paths_sys").contains("administrator rights"),
             "нет пометки про права в английском"
         );
+    }
+
+
+    /// Состав отчёта сканирования: два режима, по умолчанию — только файлы.
+    #[test]
+    fn scan_scope_switch_defaults_to_files() {
+        let cfg = UiConfig::default();
+        assert!(!cfg.scan_dirs, "по умолчанию должны быть только файлы");
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains(r#"self.t("ui.scan_scope_files")"#));
+        assert!(code.contains(r#"self.t("ui.scan_scope_all")"#));
+        // Настройка доходит до сканирования, а не только до интерфейса.
+        assert!(code.contains("include_dirs: self.ui_config.scan_dirs"));
+        let old: UiConfig = serde_json::from_str(r#"{"theme":"system","lang":"ru"}"#).unwrap();
+        assert!(!old.scan_dirs, "старый конфиг читается как «только файлы»");
     }
 
 }

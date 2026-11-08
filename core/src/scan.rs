@@ -3,6 +3,9 @@
 //! Формат отчёта: UTF-8 с BOM, разделитель `;`
 //! (Excel RU), колонки:
 //! `source_root;full_path;parent_dir;name;extension;size_mb;index_ops`.
+//!
+//! Если в [`ScanOptions`] включён `include_dirs`, добавляется колонка `type`
+//! (`file` / `dir`) и в отчёт попадают папки — в том числе пустые.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -43,6 +46,14 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
+/// Что попадает в отчёт сканирования.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOptions {
+    /// Писать в отчёт и папки (тогда колонка `type` = `file`/`dir`).
+    /// `false` — только файлы, как в прежних версиях.
+    pub include_dirs: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExtStat {
     pub count: usize,
@@ -52,6 +63,8 @@ pub struct ExtStat {
 #[derive(Debug, Clone, Default)]
 pub struct ScanStats {
     pub files: usize,
+    /// Сколько папок записано в отчёт (только при `include_dirs`).
+    pub dirs: usize,
     pub size_mb: f64,
     pub by_ext: BTreeMap<String, ExtStat>,
     /// Файлы, для которых не удалось прочитать метаданные (нет прав и т. п.).
@@ -59,6 +72,8 @@ pub struct ScanStats {
 }
 
 struct FileRow {
+    /// `file` или `dir`.
+    kind: &'static str,
     full_path: PathBuf,
     parent_dir: PathBuf,
     name: String,
@@ -81,11 +96,27 @@ fn file_row(path: &Path, size: u64) -> Option<FileRow> {
     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy().to_lowercase())).unwrap_or_else(|| "no_extension".into());
     let index_ops = extract_index_ops(&path.to_string_lossy());
     Some(FileRow {
+        kind: "file",
         full_path: path.to_path_buf(),
         parent_dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
         name,
         extension: ext,
         size_mb: size as f64 / (1024.0 * 1024.0),
+        index_ops,
+    })
+}
+
+/// Строка папки: имя, родитель, нулевой размер.
+fn dir_row(path: &Path) -> Option<FileRow> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let index_ops = extract_index_ops(&path.to_string_lossy());
+    Some(FileRow {
+        kind: "dir",
+        full_path: path.to_path_buf(),
+        parent_dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+        name,
+        extension: String::new(),
+        size_mb: 0.0,
         index_ops,
     })
 }
@@ -96,10 +127,13 @@ fn scan_task(
     counter: &AtomicUsize,
     total: usize,
     log: &LogSink,
+    opts: &ScanOptions,
 ) -> (Vec<FileRow>, ScanStats) {
     let mut rows = Vec::new();
     let mut stats = ScanStats::default();
-    let mut visit = |path: &Path, size: Option<u64>| {
+    // Явные аргументы вместо замыканий: иначе `rows`/`stats` заимствуются
+    // дважды (файлы и папки пишутся в один вектор).
+    let push_file = |path: &Path, size: Option<u64>, rows: &mut Vec<FileRow>, stats: &mut ScanStats| {
         if stop.is_set() {
             return;
         }
@@ -127,15 +161,27 @@ fn scan_task(
             {
                 let Ok(entry) = entry else { continue };
                 let ft = entry.file_type();
+                if ft.is_dir() {
+                    // Папка попадает в отчёт вместе с файлами — включая пустые.
+                    if opts.include_dirs && !stop.is_set() {
+                        if let Some(row) = dir_row(entry.path()) {
+                            stats.dirs += 1;
+                            rows.push(row);
+                        }
+                    }
+                    continue;
+                }
                 if !ft.is_file() {
                     continue;
                 }
-                visit(entry.path(), entry.metadata().map(|m| m.len()).ok());
+                let size = entry.metadata().map(|m| m.len()).ok();
+                push_file(entry.path(), size, &mut rows, &mut stats);
             }
         }
         Task::RootFiles(files) => {
             for path in files {
-                visit(path, std::fs::metadata(path).map(|m| m.len()).ok());
+                let size = std::fs::metadata(path).map(|m| m.len()).ok();
+                push_file(path, size, &mut rows, &mut stats);
             }
         }
     }
@@ -145,9 +191,18 @@ fn scan_task(
 /// Подсчёт файлов в задаче (только обход, без метаданных) — для прогресс-бара.
 /// С поддержкой стоп-сигнала: после нажатия «Остановить» обход каждого
 /// задания обрывается на следующем же входе, не дожидаясь конца дерева.
-fn count_task(task: &Task, stop: &StopToken) -> usize {
+fn count_task(task: &Task, stop: &StopToken, opts: &ScanOptions) -> usize {
     match task {
-        Task::Dir(dir) => walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_entry(|_e| !stop.is_set()).filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).count(),
+        Task::Dir(dir) => walkdir::WalkDir::new(dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|_e| !stop.is_set())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let ft = e.file_type();
+                ft.is_file() || (opts.include_dirs && ft.is_dir())
+            })
+            .count(),
         Task::RootFiles(files) => files.len(),
     }
 }
@@ -166,14 +221,16 @@ fn run_scan_tasks(
     stop: &StopToken,
     counter: &AtomicUsize,
     log: &LogSink,
+    opts: &ScanOptions,
 ) -> (usize, Vec<(Vec<FileRow>, ScanStats)>) {
-    let total_files: usize = tasks.par_iter().map(|t| count_task(t, stop)).sum();
+    let total_files: usize = tasks.par_iter().map(|t| count_task(t, stop, opts)).sum();
     emit_progress(log, 0, total_files);
     if stop.is_set() {
         // Стоп получен во время предподсчёта — скан не начинаем.
         return (total_files, Vec::new());
     }
-    let per_task: Vec<(Vec<FileRow>, ScanStats)> = tasks.par_iter().map(|t| scan_task(t, stop, counter, total_files, log)).collect();
+    let per_task: Vec<(Vec<FileRow>, ScanStats)> =
+        tasks.par_iter().map(|t| scan_task(t, stop, counter, total_files, log, opts)).collect();
     (total_files, per_task)
 }
 
@@ -190,6 +247,25 @@ pub fn scan_folder(
     max_threads: usize,
     stop: &StopToken,
     log: &LogSink,
+) -> Option<(PathBuf, ScanStats)> {
+    scan_folder_opts(
+        root,
+        master_file,
+        max_threads,
+        stop,
+        log,
+        &ScanOptions::default(),
+    )
+}
+
+/// То же, но с выбором состава отчёта (файлы / файлы и папки).
+pub fn scan_folder_opts(
+    root: &Path,
+    master_file: Option<&Path>,
+    max_threads: usize,
+    stop: &StopToken,
+    log: &LogSink,
+    opts: &ScanOptions,
 ) -> Option<(PathBuf, ScanStats)> {
     let root = match root.canonicalize() {
         Ok(r) => r,
@@ -228,9 +304,13 @@ pub fn scan_folder(
     // CRLF — как требует формат отчёта
     let mut writer = csv::WriterBuilder::new().delimiter(b';').terminator(csv::Terminator::CRLF).from_writer(BufWriter::new(file));
     if !is_master || new_file {
-        let _ = writer.write_record([
+        let mut header = vec![
             "source_root", "full_path", "parent_dir", "name", "extension", "size_mb", "index_ops",
-        ]);
+        ];
+        if opts.include_dirs {
+            header.push("type");
+        }
+        let _ = writer.write_record(&header);
     }
 
     // Задачи: топ-подпапки + собственные файлы корня.
@@ -255,8 +335,8 @@ pub fn scan_folder(
     let counter = AtomicUsize::new(0);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_threads.clamp(1, 512)).build();
     let (total_files, per_task) = match pool {
-        Ok(ref p) => p.install(|| run_scan_tasks(&tasks, stop, &counter, log)),
-        Err(_) => run_scan_tasks(&tasks, stop, &counter, log),
+        Ok(ref p) => p.install(|| run_scan_tasks(&tasks, stop, &counter, log, opts)),
+        Err(_) => run_scan_tasks(&tasks, stop, &counter, log, opts),
     };
 
     let mut total = ScanStats::default();
@@ -264,19 +344,25 @@ pub fn scan_folder(
     let mut prev_k = 0usize;
     for (rows, stats) in per_task {
         for r in &rows {
-            let _ = writer.write_record([
-                root.to_string_lossy().as_ref(),
-                r.full_path.to_string_lossy().as_ref(),
-                r.parent_dir.to_string_lossy().as_ref(),
-                r.name.as_str(),
-                r.extension.as_str(),
-                &format!("{:.2}", r.size_mb),
-                r.index_ops.as_str(),
-            ]);
+            let size = format!("{:.2}", r.size_mb);
+            let mut rec = vec![
+                root.to_string_lossy().to_string(),
+                r.full_path.to_string_lossy().to_string(),
+                r.parent_dir.to_string_lossy().to_string(),
+                r.name.clone(),
+                r.extension.clone(),
+                size,
+                r.index_ops.clone(),
+            ];
+            if opts.include_dirs {
+                rec.push(r.kind.to_string());
+            }
+            let _ = writer.write_record(&rec);
         }
         let _ = writer.flush();
         done += rows.len();
         total.files += stats.files;
+        total.dirs += stats.dirs;
         total.size_mb += stats.size_mb;
         total.meta_errors += stats.meta_errors;
         for (ext, es) in stats.by_ext {

@@ -40,7 +40,7 @@ pub use duplicates::find_duplicates_multi;
 pub use error::CoreError;
 pub use hashing::HashAlgo;
 pub use i18n::{global, set_global, tr, Lang};
-pub use scan::{scan_folder, ScanStats};
+pub use scan::{scan_folder, scan_folder_opts, ScanOptions, ScanStats};
 pub use history::{HistoryEntry, Outcome};
 pub use xlsx::csv_to_xlsx;
 pub use stop::StopToken;

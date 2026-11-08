@@ -24,6 +24,9 @@
 
 - **Сканирование** — инвентаризация файлов в CSV (UTF-8 с BOM, `;`, открывается в Excel)
   или XLSX; параллельный обход дерева, колонка `index_ops` с номером объекта.
+  Два состава отчёта (переключатель в настройках): **только файлы** — папки без
+  файлов в выгрузку не попадают; **файлы и папки** — в отчёт идут все пути,
+  включая пустые папки, с колонкой `type` (`file` / `dir`).
 - **Сравнение** — две папки по именам файлов: размер/дата, побайтово, SHA-256, MD5.
 - **Длинные пути** — обход ограничения 260 символов через префикс `\\?\` (флажок в
   настройках; права администратора не нужны). Системную поддержку (`LongPathsEnabled`)
@@ -490,6 +493,8 @@ group_id;full_path;size_bytes;hash
 
 ```
 remont_explorer.exe --cli --scan "D:\ОПС" --out "D:\Отчёты" --format xlsx
+# то же, но в отчёт попадут и папки (включая пустые), колонка type
+remont_explorer.exe --cli --scan "D:\ОПС" --dirs
 remont_explorer.exe --cli --copy D:\config\from_to.csv --verify
 remont_explorer.exe --cli --delete D:\config\folders_to_delete.txt --recycle
 remont_explorer.exe --cli --diff old.xlsx new.xlsx --out "D:\Отчёты"

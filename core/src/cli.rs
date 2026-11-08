@@ -84,6 +84,8 @@ pub struct CliOptions {
     pub delete_mode: DeleteMode,
     pub verify: bool,
     pub check_space: bool,
+    /// Сканирование: включать в отчёт папки (в том числе пустые).
+    pub scan_dirs: bool,
 }
 
 /// Текст справки.
@@ -94,6 +96,7 @@ RemontExplorer — файловые операции из командной с�
 
 Режимы (выберите один):
   --scan <папка>               сканировать папку в отчёт
+      --dirs                   вместе с файлами писать папки (включая пустые)
   --compare <файл>             сравнить пары папок из конфига
   --duplicates <файл>          найти дубликаты по списку папок
   --delete <файл>              удалить пути из списка
@@ -134,6 +137,7 @@ pub fn parse(args: &[String]) -> Result<Option<CliOptions>, String> {
     let mut delete_mode = DeleteMode::Permanent;
     let mut verify = false;
     let mut check_space = true;
+    let mut scan_dirs = false;
     let mut out: Option<PathBuf> = None;
     let mut zip = false;
     let mut export: Option<PathBuf> = None;
@@ -167,6 +171,10 @@ pub fn parse(args: &[String]) -> Result<Option<CliOptions>, String> {
             "--threads" => {
                 let v = need_value(args, &mut i, "--threads")?;
                 threads = Some(v.parse().map_err(|_| format!("не число: {v}"))?);
+            }
+            // Относится к --scan: писать в отчёт и папки, а не только файлы.
+            "--dirs" | "--with-dirs" => {
+                scan_dirs = true;
             }
             "--scan" => {
                 let dir = PathBuf::from(need_value(args, &mut i, "--scan")?);
@@ -247,6 +255,7 @@ pub fn parse(args: &[String]) -> Result<Option<CliOptions>, String> {
     }
 
     Ok(Some(CliOptions {
+        scan_dirs,
         action,
         out_dir: out,
         format,
@@ -347,7 +356,10 @@ pub fn run(opts: &CliOptions) -> i32 {
             entry.mode = "scan".into();
             entry.title = "Сканирование".into();
             let threads = opts.threads.unwrap_or(16);
-            match crate::scan_folder(dir, None, threads, &stop, &log) {
+            let scan_opts = crate::ScanOptions {
+                include_dirs: opts.scan_dirs,
+            };
+            match crate::scan_folder_opts(dir, None, threads, &stop, &log, &scan_opts) {
                 Some((path, stats)) => {
                     entry.ok = stats.files;
                     entry.errors = stats.meta_errors;
