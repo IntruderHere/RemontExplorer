@@ -3034,10 +3034,78 @@ fn parse_args_from<I: Iterator<Item = String>>(args: I) -> (Option<PathBuf>, boo
     (scan, minimized)
 }
 
+/// Подключиться к консоли родительского процесса.
+///
+/// Приложение собрано как GUI (`windows_subsystem = "windows"`), поэтому
+/// собственной консоли у него нет и `println!` в `--cli` уходил бы в никуда.
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` цепляется к консоли cmd/bat,
+/// а `CONOUT$`/`CONIN$` переназначают стандартные потоки на неё.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    // SAFETY: имена — валидные широкие строки с NUL; хэндлы проверяются.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        let out = wide("CONOUT$");
+        let h = CreateFileW(
+            out.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            SetStdHandle(STD_OUTPUT_HANDLE, h);
+            SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+        let inp = wide("CONIN$");
+        let hi = CreateFileW(
+            inp.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if hi != INVALID_HANDLE_VALUE && !hi.is_null() {
+            SetStdHandle(STD_INPUT_HANDLE, hi);
+        }
+    }
+}
+
+/// Вне Windows отдельная консоль не нужна.
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 fn main() -> eframe::Result<()> {
     // Консольный режим (`--cli ...`): выполняем операцию и выходим, окно
     // не создаётся. Без `--cli` аргументы обрабатывает GUI (контекстное меню).
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--cli") {
+        attach_parent_console();
+    }
     match remont_core::cli::parse(&args) {
         Ok(Some(opts)) => std::process::exit(remont_core::cli::run(&opts)),
         Ok(None) => {}
@@ -4413,6 +4481,23 @@ mod tests {
         assert!(code.contains("verify: self.ui_config.verify_copy"));
         assert!(code.contains("check_space: self.ui_config.check_space"));
         assert!(code.contains("copy_files_from_list_opts"));
+    }
+
+
+    /// Консольный режим подключается к консоли родителя: без этого при
+    /// GUI-подсистеме Windows вывод `--cli` некуда писать.
+    #[test]
+    fn cli_attaches_parent_console() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("fn attach_parent_console"));
+        assert!(code.contains("AttachConsole"));
+        assert!(
+            code.contains(r#"args.iter().any(|a| a == "--cli")"#),
+            "консоль не подключается при --cli"
+        );
+        // Вне Windows вызов — заглушка (компилируется и ничего не делает).
+        attach_parent_console();
     }
 
 }
