@@ -17,6 +17,21 @@ pub struct UpdateInfo {
     pub version: String,
     /// Страница релиза для скачивания.
     pub url: String,
+    /// Прямая ссылка на архив с приложением (GitHub API отдаёт её в assets).
+    /// В Atom-фиде ссылки на файл нет — тогда `None`.
+    pub asset_url: Option<String>,
+}
+
+/// Имя файла релиза (как он публикуется в GitHub Releases).
+pub const ASSET_NAME: &str = "RemontExplorer-windows-x64.zip";
+
+/// Прямая ссылка на архив релиза по его версии.
+///
+/// Нужна, когда GitHub API недоступен (отдаёт только Atom-фид): у релиза
+/// всегда есть файл с постоянным именем, ссылка строится по шаблону.
+pub fn asset_url_for(version: &str) -> String {
+    let v = version.trim().trim_start_matches(['v', 'V']);
+    format!("https://github.com/{REPO}/releases/download/v{v}/{ASSET_NAME}")
 }
 
 /// Сравнить версии вида `2.0.0` / `v2.1` / `2.1.0-beta`.
@@ -88,11 +103,29 @@ fn check_api(current: &str) -> Result<Option<UpdateInfo>, String> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases"));
 
+    // Прямая ссылка на архив: первый asset с расширением .zip.
+    let asset_url = json
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|list| {
+            list.iter()
+                .find(|a| {
+                    a.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n.to_lowercase().ends_with(".zip"))
+                        .unwrap_or(false)
+                })
+                .and_then(|a| a.get("browser_download_url"))
+                .and_then(|u| u.as_str())
+                .map(|u| u.to_string())
+        });
+
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     if is_newer(&version, current) {
         Ok(Some(UpdateInfo {
             version,
             url: page,
+            asset_url,
         }))
     } else {
         Ok(None)
@@ -113,7 +146,11 @@ fn check_atom(current: &str) -> Result<Option<UpdateInfo>, String> {
         Some((version, page)) => {
             let version = version.trim_start_matches(['v', 'V']).to_string();
             if is_newer(&version, current) {
-                Ok(Some(UpdateInfo { version, url: page }))
+                Ok(Some(UpdateInfo {
+                    version,
+                    url: page,
+                    asset_url: None,
+                }))
             } else {
                 Ok(None)
             }

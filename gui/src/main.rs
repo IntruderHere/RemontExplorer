@@ -11,6 +11,7 @@ mod i18n;
 mod logfmt;
 mod notify;
 mod schedule;
+mod selfupdate;
 mod tray;
 mod updates;
 mod winshell;
@@ -65,6 +66,12 @@ struct UiConfig {
     /// Проверять обновления на GitHub при запуске.
     #[serde(default = "default_true")]
     check_updates: bool,
+    /// Скачивать обновление в фоне сразу после обнаружения.
+    #[serde(default = "default_true")]
+    auto_download: bool,
+    /// Устанавливать без вопроса: закрыть, заменить, запустить заново.
+    #[serde(default)]
+    auto_install: bool,
     /// Показывать уведомление Windows по завершении операции.
     #[serde(default = "default_true")]
     notify: bool,
@@ -89,6 +96,8 @@ impl Default for UiConfig {
             output_dir: String::new(),
             open_result: false,
             check_updates: true,
+            auto_download: true,
+            auto_install: false,
             notify: true,
             delete_mode: remont_core::DeleteMode::Permanent,
             verify_copy: false,
@@ -468,6 +477,13 @@ enum TopTab {
     Help,
 }
 
+/// Сообщение фоновой загрузки обновления.
+enum DlMsg {
+    Progress(u64, u64),
+    Done(PathBuf),
+    Failed(String),
+}
+
 /// Метаданные запущенной операции — попадают в историю выполнений.
 #[derive(Clone, Debug, Default)]
 struct OpMeta {
@@ -587,6 +603,18 @@ struct App {
     update_done: bool,
     /// Канал результата проверки обновлений.
     update_rx: Option<mpsc::Receiver<Result<Option<updates::UpdateInfo>, String>>>,
+    /// Идёт фоновая загрузка архива обновления.
+    update_downloading: bool,
+    /// Прогресс загрузки (получено, всего; всего = 0 — неизвестно).
+    update_progress: Option<(u64, u64)>,
+    /// Скачанный и распакованный новый exe (готов к установке).
+    update_exe: Option<PathBuf>,
+    /// Ошибка загрузки/установки обновления.
+    update_download_error: Option<String>,
+    /// Канал фоновой загрузки.
+    update_dl_rx: Option<mpsc::Receiver<DlMsg>>,
+    /// Обновление готово, но ждёт окончания текущей операции.
+    install_after_op: bool,
     /// Дескриптор окна Windows (0 — ещё не получен). Нужен, чтобы трей мог
     /// показать окно, когда egui не рисует кадры.
     hwnd: std::sync::Arc<AtomicIsize>,
@@ -639,6 +667,12 @@ impl Default for App {
             update_error: None,
             update_done: false,
             update_rx: None,
+            update_downloading: false,
+            update_progress: None,
+            update_exe: None,
+            update_download_error: None,
+            update_dl_rx: None,
+            install_after_op: false,
             hwnd: std::sync::Arc::new(AtomicIsize::new(0)),
         }
     }
@@ -672,10 +706,16 @@ impl App {
         };
         match rx.try_recv() {
             Ok(Ok(info)) => {
+                let found = info.is_some();
                 self.update_info = info;
                 self.update_error = None;
                 self.update_done = true;
                 self.update_rx = None;
+                // Обновление найдено — сразу тянем архив в фоне, чтобы к
+                // моменту решения пользователя он уже лежал на диске.
+                if found && (self.ui_config.auto_download || self.ui_config.auto_install) {
+                    self.start_update_download();
+                }
                 ctx.request_repaint();
             }
             Ok(Err(e)) => {
@@ -865,15 +905,62 @@ impl App {
                             ui.label(RichText::new(self.t("about.author")).strong());
                             ui.add_space(10.0);
 
-                            // ---- Проверка обновлений ----
-                            if let Some(info) = &self.update_info {
-                                let text = self.tf("upd.available", std::slice::from_ref(&info.version));
+                            // ---- Проверка и установка обновлений ----
+                            let upd_version = self.update_info.as_ref().map(|i| i.version.clone());
+                            let upd_page = self.update_info.as_ref().map(|i| i.url.clone()).unwrap_or_default();
+                            let has_asset = self
+                                .update_info
+                                .as_ref()
+                                .map(|i| i.asset_url.is_some())
+                                .unwrap_or(false);
+
+                            if let Some(version) = upd_version {
+                                let text = self.tf("upd.available", std::slice::from_ref(&version));
                                 ui.label(
                                     RichText::new(text).strong().color(egui::Color32::from_rgb(200, 120, 0)),
                                 );
                                 ui.add_space(6.0);
-                                if ui.button(self.t("upd.download")).clicked() {
-                                    open_url(&info.url);
+
+                                if self.update_exe.is_some() {
+                                    // Архив скачан и распакован — предлагаем установку.
+                                    let ready = self.tf("upd.ready", std::slice::from_ref(&version));
+                                    ui.label(RichText::new(ready).color(egui::Color32::from_rgb(40, 140, 70)));
+                                    ui.add_space(6.0);
+                                    if ui
+                                        .add(egui::Button::new(RichText::new(self.t("upd.install")).strong()))
+                                        .clicked()
+                                    {
+                                        self.apply_update();
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new(self.t("upd.install_hint")).weak());
+                                } else if self.update_downloading {
+                                    let (got, total) = self.update_progress.unwrap_or((0, 0));
+                                    if total > 0 {
+                                        let pct = (got as f64 / total as f64 * 100.0).round() as u64;
+                                        ui.add(
+                                            egui::ProgressBar::new((got as f32 / total as f32).clamp(0.0, 1.0))
+                                                .text(self.tf("upd.downloading", &[pct.to_string()])),
+                                        );
+                                    } else {
+                                        ui.add(egui::ProgressBar::new(0.0).animate(true).text(self.t("upd.downloading_unknown")));
+                                    }
+                                } else if let Some(err) = self.update_download_error.clone() {
+                                    ui.label(
+                                        RichText::new(self.tf("upd.dl_failed", std::slice::from_ref(&err)))
+                                            .color(egui::Color32::from_rgb(180, 60, 60)),
+                                    );
+                                    ui.add_space(4.0);
+                                    if has_asset && ui.button(self.t("upd.retry")).clicked() {
+                                        self.start_update_download();
+                                    }
+                                } else if has_asset {
+                                    if ui.button(self.t("upd.download")).clicked() {
+                                        self.start_update_download();
+                                    }
+                                } else if ui.button(self.t("upd.download")).clicked() {
+                                    // Atom-фид: прямой ссылки нет — открываем страницу релиза.
+                                    open_url(&upd_page);
                                 }
                             } else if self.update_rx.is_some() {
                                 ui.label(RichText::new(self.t("upd.checking")).weak());
@@ -1120,6 +1207,12 @@ impl App {
         }
 
         self.reload_history();
+
+        // Отложенная автоустановка: не обрываем выполняющуюся операцию.
+        if self.install_after_op && !self.running {
+            self.install_after_op = false;
+            self.apply_update();
+        }
     }
 
     /// Перечитать историю с диска (вкладка «История»).
@@ -1351,6 +1444,123 @@ impl App {
     }
 
     /// Запуск операции по кнопке «Старт».
+    /// Скачать архив обновления в фоне.
+    fn start_update_download(&mut self) {
+        if self.update_downloading {
+            return;
+        }
+        let Some(info) = self.update_info.clone() else {
+            return;
+        };
+        // Если API закрыт и пришёл Atom-фид, прямой ссылки нет — строим её
+        // по шаблону: у релиза всегда один архив с постоянным именем.
+        let url = info
+            .asset_url
+            .clone()
+            .unwrap_or_else(|| updates::asset_url_for(&info.version));
+        self.update_downloading = true;
+        self.update_download_error = None;
+        self.update_progress = None;
+
+        let (tx, rx) = mpsc::channel::<DlMsg>();
+        self.update_dl_rx = Some(rx);
+        thread::spawn(move || {
+            let dir = selfupdate::staging_dir();
+            let zip = dir.join("update.zip");
+            let txp = tx.clone();
+            let res = selfupdate::download(&url, &zip, move |got, total| {
+                let _ = txp.send(DlMsg::Progress(got, total));
+            })
+            .and_then(|()| selfupdate::unpack(&zip, &dir.join("unpacked")));
+            match res {
+                Ok(exe) => {
+                    let _ = tx.send(DlMsg::Done(exe));
+                }
+                Err(e) => {
+                    let _ = tx.send(DlMsg::Failed(e));
+                }
+            }
+        });
+    }
+
+    /// Забрать состояние фоновой загрузки.
+    fn poll_update_download(&mut self, ctx: &egui::Context) {
+        // Сообщения собираются заранее: держать заимствование канала и
+        // одновременно менять поля `self` нельзя.
+        let mut messages: Vec<DlMsg> = Vec::new();
+        let mut disconnected = false;
+        if let Some(rx) = &self.update_dl_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(m) => messages.push(m),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+        }
+        for m in messages {
+            match m {
+                DlMsg::Progress(got, total) => {
+                    self.update_progress = Some((got, total));
+                    ctx.request_repaint();
+                }
+                DlMsg::Done(exe) => {
+                    self.update_downloading = false;
+                    self.update_exe = Some(exe);
+                    self.update_dl_rx = None;
+                    self.update_progress = None;
+                    ctx.request_repaint();
+                    // Настройка «автоматическая загрузка и установка»:
+                    // ставим сразу, не дожидаясь нажатия кнопки.
+                    if self.ui_config.auto_install && !self.running {
+                        self.apply_update();
+                    } else if self.ui_config.auto_install {
+                        self.install_after_op = true;
+                    }
+                }
+                DlMsg::Failed(e) => {
+                    self.update_downloading = false;
+                    self.update_download_error = Some(e);
+                    self.update_dl_rx = None;
+                    self.update_progress = None;
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if disconnected {
+            self.update_downloading = false;
+            self.update_dl_rx = None;
+        }
+    }
+
+    /// Заменить приложение и перезапустить.
+    ///
+    /// Перед выходом сохраняются настройки и расписание: новый exe стартует
+    /// с тем же состоянием.
+    fn apply_update(&mut self) {
+        let Some(new_exe) = self.update_exe.clone() else {
+            return;
+        };
+        let Ok(current) = std::env::current_exe() else {
+            self.update_download_error = Some(self.t("upd.no_path").to_string());
+            return;
+        };
+        save_ui_config(&self.ui_config);
+        self.sched.save();
+        match selfupdate::apply(&current, &new_exe) {
+            Ok(()) => {
+                // Даём bat-сценарию время увидеть наш PID до выхода.
+                std::process::exit(0);
+            }
+            Err(e) => {
+                self.update_download_error = Some(e);
+            }
+        }
+    }
+
     /// Сравнить два отчёта сканирования: что появилось, исчезло, изменилось.
     fn start_diff(&mut self) {
         let old = std::path::PathBuf::from(self.diff_old.trim());
@@ -1682,6 +1892,8 @@ impl App {
         let l_reset = self.t("ui.output_reset").to_string();
         let l_open_result = self.t("ui.open_result").to_string();
         let l_check_updates = self.t("ui.check_updates").to_string();
+        let l_auto_download = self.t("ui.auto_download").to_string();
+        let l_auto_install = self.t("ui.auto_install").to_string();
         let l_notify = self.t("ui.notify").to_string();
         let l_delete_mode = self.t("ui.delete_mode").to_string();
         let l_verify_copy = self.t("ui.verify_copy").to_string();
@@ -1747,6 +1959,17 @@ impl App {
             ui.checkbox(&mut self.ui_config.verify_copy, &l_verify_copy);
             ui.checkbox(&mut self.ui_config.check_space, &l_check_space);
             ui.checkbox(&mut self.ui_config.check_updates, &l_check_updates);
+            // Автоустановка немыслима без автозагрузки — включаем её следом.
+            let mut auto_install = self.ui_config.auto_install;
+            if ui.checkbox(&mut auto_install, &l_auto_install).changed() {
+                self.ui_config.auto_install = auto_install;
+                if auto_install {
+                    self.ui_config.auto_download = true;
+                }
+            }
+            ui.add_enabled_ui(!self.ui_config.auto_install, |ui| {
+                ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
+            });
 
             if is_win {
                 ui.add_space(4.0);
@@ -2869,6 +3092,7 @@ impl eframe::App for App {
             self.start_update_check();
         }
         self.poll_update(ctx);
+        self.poll_update_download(ctx);
         self.ensure_tray(ctx);
         self.startup_actions();
 
@@ -4994,6 +5218,59 @@ mod tests {
         assert_eq!(back.tasks[0].output_dir, "D:\\out");
 
         let _ = fs::remove_file(&dir);
+    }
+
+
+    /// Настройка «автоматическая загрузка и установка» сохраняется и читается.
+    #[test]
+    fn auto_update_settings_roundtrip() {
+        let _d = test_data_dir();
+        let cfg = UiConfig {
+            auto_download: false,
+            auto_install: true,
+            ..Default::default()
+        };
+        let back: UiConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(back.auto_install);
+        assert!(!back.auto_download);
+
+        // Старый ui.json без этих полей: загрузка включена, установка — нет.
+        let old = r#"{"theme":"light","lang":"ru"}"#;
+        let back: UiConfig = serde_json::from_str(old).unwrap();
+        assert!(back.auto_download);
+        assert!(!back.auto_install, "автоустановка не должна включаться сама");
+    }
+
+    /// Автоустановка включает автозагрузку и ставит обновление сама,
+    /// не обрывая выполняющуюся операцию.
+    #[test]
+    fn auto_install_behaviour() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        // Автозагрузка включается вместе с автоустановкой.
+        assert!(code.contains("self.ui_config.auto_download = true;"));
+        // Загрузка стартует и при выключенной автозагрузке, если включена автоустановка.
+        assert!(code.contains("auto_download || self.ui_config.auto_install"));
+        // Установка откладывается до конца операции.
+        assert!(code.contains("install_after_op"));
+        assert!(code.contains("if self.install_after_op && !self.running"));
+        // Установка сохраняет состояние и заменяет файл.
+        let start = code.find("fn apply_update").expect("нет установки");
+        let block = &code[start..start + 900];
+        assert!(block.contains("save_ui_config"));
+        assert!(block.contains("self.sched.save()"));
+        assert!(block.contains("selfupdate::apply"));
+    }
+
+    /// Прямая ссылка на релиз строится по шаблону (нужна при недоступном API).
+    #[test]
+    fn asset_url_is_built_from_version() {
+        use updates::asset_url_for;
+        assert_eq!(
+            asset_url_for("2.3.0"),
+            "https://github.com/IntruderHere/RemontExplorer/releases/download/v2.3.0/RemontExplorer-windows-x64.zip"
+        );
+        assert_eq!(asset_url_for("v2.3.0"), asset_url_for("2.3.0"));
     }
 
 }

@@ -3414,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "remont-core"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "chrono",
  "csv",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "remont-gui"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -3453,6 +3453,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "windows-sys 0.59.0",
+ "zip 2.6.1",
 ]
 
 [[package]]
