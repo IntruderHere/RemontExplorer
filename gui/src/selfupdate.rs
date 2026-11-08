@@ -110,56 +110,133 @@ pub fn unpack(zip_path: &Path, out_dir: &Path) -> Result<PathBuf, String> {
 ///
 /// Возвращает управление только при ошибке запуска — при успехе вызывающий
 /// должен завершить процесс (`std::process::exit(0)`).
+///
+/// Почему PowerShell, а не bat: `.bat` читается cmd в OEM-кодировке, и путь
+/// с кириллицей (`C:\Users\Иван\AppData\...`) превращается в мусор — замена
+/// не выполнялась, приложение просто закрывалось. `-EncodedCommand`
+/// передаёт сценарий в UTF-16 base64, кодировка не участвует вовсе.
 pub fn apply(current_exe: &Path, new_exe: &Path) -> Result<(), String> {
     let dir = staging_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("не создать папку обновления: {e}"))?;
-    let bat = dir.join("apply_update.bat");
+    let log = dir.join("update.log");
+    let script = build_script(std::process::id(), new_exe, current_exe, &log);
+    // Диагностика: если обновление не сработает, в этом файле останется след.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| {
+            use std::io::Write as _;
+            writeln!(
+                f,
+                "LAUNCH {} new={} dst={}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                new_exe.display(),
+                current_exe.display()
+            )
+        });
 
-    let script = format!(
-        "@echo off\r\n\
-chcp 65001 >nul\r\n\
-setlocal\r\n\
-set \"PID={pid}\"\r\n\
-set \"NEW={new}\"\r\n\
-set \"DST={dst}\"\r\n\
-:wait\r\n\
-tasklist /FI \"PID eq %PID%\" 2>nul | findstr /C:\"%PID%\" >nul\r\n\
-if errorlevel 1 goto apply\r\n\
-timeout /t 1 /nobreak >nul\r\n\
-goto wait\r\n\
-:apply\r\n\
-copy /y \"%NEW%\" \"%DST%\" >nul\r\n\
-if errorlevel 1 (\r\n\
-  echo Не удалось заменить файл: %DST% 1>>\"%~dp0update.log\"\r\n\
-) else (\r\n\
-  echo Обновление установлено: %DST% 1>>\"%~dp0update.log\"\r\n\
-)\r\n\
-start \"\" \"%DST%\"\r\n\
-timeout /t 2 /nobreak >nul\r\n\
-del \"%~f0\"\r\n",
-        pid = std::process::id(),
-        new = new_exe.display(),
-        dst = current_exe.display()
-    );
-
-    std::fs::write(&bat, script.as_bytes()).map_err(|e| format!("не создать сценарий: {e}"))?;
+    let encoded = encode_powershell(&script);
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", &bat.to_string_lossy()])
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                &encoded,
+            ])
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| format!("не удалось запустить обновление: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "не удалось запустить обновление: {e} (подробности: {})",
+                    log.display()
+                )
+            })?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
+        let _ = encoded;
         Err("обновление с заменой файла поддерживается только в Windows".into())
     }
+}
+
+/// Текст сценария замены. Вынесен отдельно, чтобы проверялся тестом:
+/// ошибки в кавычках здесь означали бы «приложение закрылось и не вернулось».
+fn build_script(pid: u32, new_exe: &Path, dst: &Path, log: &Path) -> String {
+    // Одинарные кавычки в PowerShell: внутри строки удваиваются.
+    let q = |p: &Path| p.to_string_lossy().replace('\'', "''");
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$log = '{log}'
+$oldPid = {pid}
+try {{
+    # Ждём выхода приложения: заменить работающий exe нельзя.
+    for ($i = 0; $i -lt 600; $i++) {{
+        if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{ break }}
+        Start-Sleep -Milliseconds 300
+    }}
+    Start-Sleep -Milliseconds 300
+    Copy-Item -LiteralPath '{new}' -Destination '{dst}' -Force
+    Add-Content -LiteralPath $log -Value ("OK  " + (Get-Date -Format s) + "  " + '{dst}')
+    Start-Process -FilePath '{dst}' -WorkingDirectory (Split-Path -LiteralPath '{dst}')
+    exit 0
+}} catch {{
+    Add-Content -LiteralPath $log -Value ("FAIL " + (Get-Date -Format s) + "  " + $_.Exception.Message)
+    # Даже при неудаче возвращаем приложение пользователю (старая версия).
+    try {{ Start-Process -FilePath '{dst}' -WorkingDirectory (Split-Path -LiteralPath '{dst}') }} catch {{ }}
+    exit 1
+}}
+"#,
+        log = q(log),
+        pid = pid,
+        new = q(new_exe),
+        dst = q(dst)
+    )
+}
+
+/// Сценарий PowerShell → base64 UTF-16LE (формат `-EncodedCommand`).
+fn encode_powershell(script: &str) -> String {
+    let utf16: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    base64(&utf16)
+}
+
+/// Минимальный base64 (без внешних зависимостей).
+fn base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -294,21 +371,69 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
-    fn apply_creates_script() {
-        let dir = std::env::temp_dir().join(format!("upd_apply_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let cur = dir.join("remont_explorer.exe");
-        let new = dir.join("new.exe");
-        std::fs::write(&cur, b"old").unwrap();
-        std::fs::write(&new, b"new").unwrap();
-        apply(&cur, &new).expect("сценарий обновления");
-        let bat = staging_dir().join("apply_update.bat");
-        assert!(bat.exists());
-        let body = std::fs::read_to_string(&bat).unwrap();
-        assert!(body.contains("copy /y"));
-        assert!(body.contains(&format!("{}", std::process::id())));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn base64_matches_reference() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
+        assert_eq!(base64(b"\xff\xfe"), "//4=");
     }
+
+    /// `-EncodedCommand` ждёт UTF-16LE в base64: проверяем декодированием.
+    #[test]
+    fn powershell_command_is_utf16_base64() {
+        let script = "Write-Output 'Привет, ОПС'";
+        let enc = encode_powershell(script);
+        let bytes = decode_base64(&enc);
+        let units: Vec<u16> = (0..bytes.len() / 2)
+            .map(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).unwrap();
+        assert_eq!(decoded, script);
+    }
+
+    /// Простая проверка base64 — нужна только в тестах.
+    fn decode_base64(s: &str) -> Vec<u8> {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::new();
+        let mut buf: u32 = 0;
+        let mut bits = 0;
+        for ch in s.bytes() {
+            if ch == b'=' {
+                break;
+            }
+            let Some(v) = T.iter().position(|&c| c == ch) else { continue };
+            buf = (buf << 6) | v as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buf >> bits) as u8);
+            }
+        }
+        out
+    }
+
+
+    /// Сценарий ждёт PID, копирует и запускает приложение; пути с одинарными
+    /// кавычками не ломают синтаксис.
+    #[test]
+    fn update_script_waits_copies_and_starts() {
+        let new = Path::new(r"C:\Temp\new.exe");
+        let dst = Path::new(r"C:\Program Files\Remont's\remont_explorer.exe");
+        let log = Path::new(r"C:\Temp\update.log");
+        let script = build_script(4242, new, dst, log);
+
+        assert!(script.contains("$oldPid = 4242"));
+        assert!(script.contains("Get-Process -Id $oldPid"));
+        assert!(script.contains("Copy-Item -LiteralPath"));
+        assert!(script.contains("Start-Process -FilePath"));
+        // Кавычка в пути удвоена — иначе PowerShell оборвал бы строку.
+        assert!(script.contains("Remont''s"));
+        assert!(!script.contains("Remont's"));
+        // Даже при ошибке старая версия запускается обратно.
+        assert!(script.contains("catch"));
+        assert!(script.contains("exit 1"));
+    }
+
 }
