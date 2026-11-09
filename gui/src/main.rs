@@ -1334,12 +1334,14 @@ impl App {
                 let color = mode_colors[i];
                 let is_active = self.mode == Some(def.mode);
                 if self.running {
-                    ui.label(
-                        RichText::new(format!("{} {}", icon, label))
-                            .size(13.0)
-                            .color(if is_active { color } else { color.linear_multiply(0.4) })
-                            .weak(),
-                    );
+                    // Во время работы кнопки недоступны, но текст остаётся
+                    // обычным (тёмным в светлой теме) — активный режим выделен
+                    // жирным, а не цветом.
+                    let mut text = RichText::new(format!("{} {}", icon, label)).size(13.0);
+                    if is_active {
+                        text = text.strong();
+                    }
+                    ui.label(text);
                 } else {
                     let btn = egui::Button::new(format!("{} {}", icon, label))
                         .fill(if is_active { color.linear_multiply(0.15) } else { egui::Color32::TRANSPARENT })
@@ -5668,5 +5670,21 @@ mod tests {
     }
 
 
+
+
+    /// Во время работы текст кнопок режимов остаётся обычным (тёмным),
+    /// а не бледным и не цветным: раньше активный режим был синим,
+    /// остальные — выцветшими.
+    #[test]
+    fn running_mode_labels_keep_normal_color() {
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        let start = code.find("let is_active = self.mode == Some(def.mode);").expect("нет блока режимов");
+        let block = &code[start..start + 700];
+        assert!(!block.contains("linear_multiply"), "текст режимов выцветает");
+        assert!(!block.contains(".weak()"), "текст режимов ослаблен");
+        assert!(!block.contains("color("), "текст режимов красится цветом режима");
+        assert!(block.contains(".strong()"), "активный режим не выделен начертанием");
+    }
 
 }
