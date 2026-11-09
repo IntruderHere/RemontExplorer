@@ -66,12 +66,6 @@ struct UiConfig {
     /// Проверять обновления на GitHub при запуске.
     #[serde(default = "default_true")]
     check_updates: bool,
-    /// Скачивать обновление в фоне сразу после обнаружения.
-    #[serde(default = "default_true")]
-    auto_download: bool,
-    /// Устанавливать без вопроса: закрыть, заменить, запустить заново.
-    #[serde(default)]
-    auto_install: bool,
     /// Показывать уведомление Windows по завершении операции.
     #[serde(default = "default_true")]
     notify: bool,
@@ -107,8 +101,6 @@ impl Default for UiConfig {
             output_dir: String::new(),
             open_result: false,
             check_updates: true,
-            auto_download: true,
-            auto_install: false,
             notify: true,
             delete_mode: remont_core::DeleteMode::Permanent,
             verify_copy: false,
@@ -652,7 +644,6 @@ struct App {
     /// Канал фоновой загрузки.
     update_dl_rx: Option<mpsc::Receiver<DlMsg>>,
     /// Обновление готово, но ждёт окончания текущей операции.
-    install_after_op: bool,
     /// Дескриптор окна Windows (0 — ещё не получен). Нужен, чтобы трей мог
     /// показать окно, когда egui не рисует кадры.
     hwnd: std::sync::Arc<AtomicIsize>,
@@ -713,7 +704,6 @@ impl Default for App {
             long_paths_msg: None,
             update_auto_disabled: false,
             update_dl_rx: None,
-            install_after_op: false,
             hwnd: std::sync::Arc::new(AtomicIsize::new(0)),
         }
     }
@@ -758,11 +748,9 @@ impl App {
                 self.update_error = None;
                 self.update_done = true;
                 self.update_rx = None;
-                // Обновление найдено — сразу тянем архив в фоне, чтобы к
-                // моменту решения пользователя он уже лежал на диске.
-                if found && !self.update_auto_disabled && (self.ui_config.auto_download || self.ui_config.auto_install) {
-                    self.start_update_download();
-                }
+                // Ничего не скачиваем сами: пользователь нажимает «Скачать»,
+                // затем «Обновить и перезапустить».
+                let _ = found;
                 ctx.request_repaint();
             }
             Ok(Err(e)) => {
@@ -1307,11 +1295,6 @@ impl App {
 
         self.reload_history();
 
-        // Отложенная автоустановка: не обрываем выполняющуюся операцию.
-        if self.install_after_op && !self.running {
-            self.install_after_op = false;
-            self.apply_update();
-        }
     }
 
     /// Перечитать историю с диска (вкладка «История»).
@@ -1629,13 +1612,7 @@ impl App {
                     self.update_dl_rx = None;
                     self.update_progress = None;
                     ctx.request_repaint();
-                    // Настройка «автоматическая загрузка и установка»:
-                    // ставим сразу, не дожидаясь нажатия кнопки.
-                    if self.ui_config.auto_install && !self.running {
-                        self.apply_update();
-                    } else if self.ui_config.auto_install {
-                        self.install_after_op = true;
-                    }
+                    // Установка — только по кнопке «Обновить и перезапустить».
                 }
                 DlMsg::Failed(e) => {
                     self.update_downloading = false;
@@ -2023,8 +2000,6 @@ impl App {
         let l_reset = self.t("ui.output_reset").to_string();
         let l_open_result = self.t("ui.open_result").to_string();
         let l_check_updates = self.t("ui.check_updates").to_string();
-        let l_auto_download = self.t("ui.auto_download").to_string();
-        let l_auto_install = self.t("ui.auto_install").to_string();
         let l_notify = self.t("ui.notify").to_string();
         let l_delete_mode = self.t("ui.delete_mode").to_string();
         let l_verify_copy = self.t("ui.verify_copy").to_string();
@@ -2080,7 +2055,6 @@ impl App {
 
             // Два столбца: слева — операции, справа — обновления. Одним
             // списком блок занимал пол-окна, а справа оставалась пустота.
-            let mut auto_install = self.ui_config.auto_install;
             ui.columns(2, |cols| {
                 cols[0].checkbox(&mut self.ui_config.open_result, &l_open_result);
                 cols[0].checkbox(&mut self.ui_config.notify, &l_notify);
@@ -2096,15 +2070,7 @@ impl App {
 
                 cols[1].checkbox(&mut self.ui_config.check_updates, &l_check_updates);
                 // Автоустановка немыслима без автозагрузки — включаем её следом.
-                if cols[1].checkbox(&mut auto_install, &l_auto_install).changed() {
-                    self.ui_config.auto_install = auto_install;
-                    if auto_install {
-                        self.ui_config.auto_download = true;
-                    }
-                }
-                cols[1].add_enabled_ui(!self.ui_config.auto_install, |ui| {
-                    ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
-                });
+
             });
 
             // Источник обновлений: нужен там, где GitHub заблокирован.
@@ -5480,45 +5446,34 @@ mod tests {
     }
 
 
-    /// Настройка «автоматическая загрузка и установка» сохраняется и читается.
+    /// Автоустановки и автозагрузки больше нет: обновление ставится только
+    /// по кнопкам «Скачать» и «Обновить и перезапустить».
     #[test]
-    fn auto_update_settings_roundtrip() {
-        let _d = test_data_dir();
-        let cfg = UiConfig {
-            auto_download: false,
-            auto_install: true,
-            ..Default::default()
-        };
-        let back: UiConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
-        assert!(back.auto_install);
-        assert!(!back.auto_download);
-
-        // Старый ui.json без этих полей: загрузка включена, установка — нет.
-        let old = r#"{"theme":"light","lang":"ru"}"#;
-        let back: UiConfig = serde_json::from_str(old).unwrap();
-        assert!(back.auto_download);
-        assert!(!back.auto_install, "автоустановка не должна включаться сама");
-    }
-
-    /// Автоустановка включает автозагрузку и ставит обновление сама,
-    /// не обрывая выполняющуюся операцию.
-    #[test]
-    fn auto_install_behaviour() {
+    fn update_is_manual_only() {
         let src = include_str!("main.rs");
         let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
-        // Автозагрузка включается вместе с автоустановкой.
-        assert!(code.contains("self.ui_config.auto_download = true;"));
-        // Загрузка стартует и при выключенной автозагрузке, если включена автоустановка.
-        assert!(code.contains("auto_download || self.ui_config.auto_install"));
-        // Установка откладывается до конца операции.
-        assert!(code.contains("install_after_op"));
-        assert!(code.contains("if self.install_after_op && !self.running"));
-        // Установка сохраняет состояние и заменяет файл.
-        let start = code.find("fn apply_update").expect("нет установки");
-        let block = &code[start..start + 1600];
-        assert!(block.contains("save_ui_config"));
-        assert!(block.contains("self.sched.save()"));
-        assert!(block.contains("selfupdate::apply"));
+        assert!(!code.contains("auto_install"), "осталась автоустановка");
+        assert!(!code.contains("auto_download"), "осталась автозагрузка");
+        // В настройках нет этих флажков.
+        let settings = &code[code.find("fn settings_options").unwrap()..];
+        assert!(!settings.contains("ui.auto_install"));
+        assert!(!settings.contains("ui.auto_download"));
+        // Кнопки ручного обновления на месте.
+        assert!(code.contains("upd.download"), "нет кнопки «Скачать обновление»");
+        assert!(code.contains("upd.install"), "нет кнопки «Обновить и перезапустить»");
+        // Автоскачивание при найденном обновлении не запускается.
+        let poll = &code[code.find("fn poll_update").unwrap()..];
+        let poll = &poll[..poll.find("fn ").unwrap_or(poll.len())];
+        assert!(!poll.contains("start_update_download"), "обновление качается само");
+    }
+
+    /// Старый `ui.json` с полями автообновления читается без ошибок:
+    /// неизвестные поля просто игнорируются.
+    #[test]
+    fn old_config_with_auto_fields_still_loads() {
+        let old = r#"{"theme":"light","lang":"ru","auto_download":true,"auto_install":true}"#;
+        let cfg: UiConfig = serde_json::from_str(old).expect("старый конфиг не читается");
+        assert_eq!(cfg.lang, Lang::Ru);
     }
 
     /// Прямая ссылка на релиз строится по шаблону (нужна при недоступном API).
