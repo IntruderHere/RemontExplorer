@@ -1,0 +1,32 @@
+[package]
+name = "remont-gui"
+description = "GUI RemontExplorer (egui/eframe) — тонкий слой над remont-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "remont_explorer"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+dirs.workspace = true
+raw-window-handle = "0.6"
+ureq.workspace = true
+remont-core = { path = "../core" }
+eframe.workspace = true
+egui.workspace = true
+image.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zip.workspace = true
+
+[build-dependencies]
+embed-resource = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Threading"] }

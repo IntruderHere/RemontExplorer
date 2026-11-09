@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+
+# Локальные настройки и артефакты
+/config/
+*.zip
+*.exe
+logs/
+
+# macOS
+.DS_Store
+
+# Отчёты тестовых прогонов
+files_info_*.*
+BATCH_SCAN_*.*
+compare_*.csv
+diff_*.csv
+deleted_*.zip

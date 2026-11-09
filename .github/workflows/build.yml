@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          target: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --workspace
+      - name: Tests (core)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --target ${{ matrix.target }} -p filemanager-core
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filemanager-${{ matrix.os }}
+          path: ${{ matrix.os == 'windows-latest' && 'target/x86_64-pc-windows-msvc/release/filemanager.exe' || 'target/aarch64-apple-darwin/release/filemanager' }}

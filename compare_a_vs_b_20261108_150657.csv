@@ -1,0 +1,3 @@
+﻿file_name;path_in_a;path_in_b;size_a_mb;size_b_mb;modified_a;modified_b;different
+x.txt;/tmp/cli_final/cmp/a/x.txt;N/A;0.00;;2026-11-08T15:06:57.792433;;Yes
+y.txt;N/A;/tmp/cli_final/cmp/b/y.txt;;0.00;;2026-11-08T15:06:57.792492;Yes

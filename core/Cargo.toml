@@ -1,0 +1,36 @@
+[package]
+name = "remont-core"
+description = "Ядро RemontExplorer: файловые операции без GUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "remont_core"
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+dirs.workspace = true
+quick-xml = "0.41"
+csv.workspace = true
+encoding_rs.workspace = true
+filetime.workspace = true
+md-5.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+rust_xlsxwriter.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
