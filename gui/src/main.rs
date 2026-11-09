@@ -91,6 +91,10 @@ struct UiConfig {
     /// Сканирование: писать в отчёт и папки (включая пустые), а не только файлы.
     #[serde(default)]
     scan_dirs: bool,
+    /// Источник обновлений вместо GitHub: URL манифеста `update.json`,
+    /// `file://`, UNC или путь к папке. Пусто — GitHub.
+    #[serde(default)]
+    update_source: String,
 }
 
 impl Default for UiConfig {
@@ -111,6 +115,7 @@ impl Default for UiConfig {
             check_space: true,
             long_paths: true,
             scan_dirs: false,
+            update_source: String::new(),
         }
     }
 }
@@ -730,8 +735,14 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         self.update_rx = Some(rx);
+        let source = self.ui_config.update_source.trim().to_string();
         thread::spawn(move || {
-            let res = updates::check(env!("CARGO_PKG_VERSION"));
+            let current = env!("CARGO_PKG_VERSION");
+            let res = if source.is_empty() {
+                updates::check(current)
+            } else {
+                updates::check_manifest(&source, current)
+            };
             let _ = tx.send(res);
         });
     }
@@ -1547,6 +1558,9 @@ impl App {
             .asset_url
             .clone()
             .unwrap_or_else(|| updates::asset_url_for(&info.version));
+        // Хеш известен до запуска потока: внутри `thread::spawn` `self` брать нельзя.
+        let expect_sha = info.sha256.clone();
+        let sha_msg = self.t("upd.sha_mismatch").to_string();
         self.update_downloading = true;
         self.update_download_error = None;
         self.update_progress = None;
@@ -1560,7 +1574,20 @@ impl App {
             let res = selfupdate::download(&url, &zip, move |got, total| {
                 let _ = txp.send(DlMsg::Progress(got, total));
             })
-            .and_then(|()| selfupdate::unpack(&zip, &dir.join("unpacked")));
+            .and_then(|()| {
+                // Хеш из манифеста: обновление из внешнего источника не ставим,
+                // если архив не совпал.
+                if let Some(expected) = expect_sha {
+                    let got = updates::sha256_file(&zip)?;
+                    if got != expected.to_lowercase() {
+                        let _ = std::fs::remove_file(&zip);
+                        return Err(sha_msg
+                            .replace("{expected}", &expected)
+                            .replace("{got}", &got));
+                    }
+                }
+                selfupdate::unpack(&zip, &dir.join("unpacked"))
+            });
             match res {
                 Ok(exe) => {
                     let _ = tx.send(DlMsg::Done(exe));
@@ -2004,6 +2031,8 @@ impl App {
         let l_check_space = self.t("ui.check_space").to_string();
         let l_long_paths = self.t("ui.long_paths").to_string();
         let l_scan_scope = self.t("ui.scan_scope").to_string();
+        let l_update_source = self.t("ui.update_source").to_string();
+        let l_update_source_hint = self.t("ui.update_source_hint").to_string();
         let l_scan_files = self.t("ui.scan_scope_files").to_string();
         let l_scan_all = self.t("ui.scan_scope_all").to_string();
         let l_menu = self.tf("win.ctx_menu", &[winshell::menu_caption(self.ui_config.lang == Lang::Ru).to_string()]);
@@ -2076,6 +2105,16 @@ impl App {
                 cols[1].add_enabled_ui(!self.ui_config.auto_install, |ui| {
                     ui.checkbox(&mut self.ui_config.auto_download, &l_auto_download);
                 });
+            });
+
+            // Источник обновлений: нужен там, где GitHub заблокирован.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(&l_update_source);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.ui_config.update_source)
+                        .desired_width(260.0)
+                        .hint_text(&l_update_source_hint),
+                );
             });
 
             // Что попадает в отчёт сканирования: только файлы или ещё и папки.
@@ -5656,5 +5695,23 @@ mod tests {
         assert!(code.contains(r#"t("about.tg")"#));
         assert!(code.contains(r#"t("about.gh")"#));
     }
+
+
+    /// Источник обновлений настраивается: по умолчанию GitHub, иначе манифест.
+    #[test]
+    fn update_source_setting_wired() {
+        let cfg = UiConfig::default();
+        assert!(cfg.update_source.is_empty(), "по умолчанию источник — GitHub");
+        let old: UiConfig = serde_json::from_str(r#"{"theme":"system","lang":"ru"}"#).unwrap();
+        assert!(old.update_source.is_empty(), "старый конфиг читается без источника");
+
+        let src = include_str!("main.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
+        assert!(code.contains("check_manifest"), "источник не используется при проверке");
+        assert!(code.contains(r#"t("ui.update_source")"#), "нет поля в настройках");
+        assert!(code.contains("sha256_file"), "нет проверки хеша архива");
+    }
+
+
 
 }

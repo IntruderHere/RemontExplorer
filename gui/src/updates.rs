@@ -20,6 +20,8 @@ pub struct UpdateInfo {
     /// Прямая ссылка на архив с приложением (GitHub API отдаёт её в assets).
     /// В Atom-фиде ссылки на файл нет — тогда `None`.
     pub asset_url: Option<String>,
+    /// Ожидаемый SHA-256 архива (из манифеста). `None` — проверка не задана.
+    pub sha256: Option<String>,
 }
 
 /// Имя файла релиза (как он публикуется в GitHub Releases).
@@ -123,6 +125,7 @@ fn check_api(current: &str) -> Result<Option<UpdateInfo>, String> {
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     if is_newer(&version, current) {
         Ok(Some(UpdateInfo {
+            sha256: None,
             version,
             url: page,
             asset_url,
@@ -147,6 +150,7 @@ fn check_atom(current: &str) -> Result<Option<UpdateInfo>, String> {
             let version = version.trim_start_matches(['v', 'V']).to_string();
             if is_newer(&version, current) {
                 Ok(Some(UpdateInfo {
+                    sha256: None,
                     version,
                     url: page,
                     asset_url: None,
@@ -265,4 +269,144 @@ mod tests {
         assert!(is_newer("2.4.1", "2.4.0"));
     }
 
+}
+
+/// Манифест обновления (`update.json`).
+///
+/// Публикуется рядом с архивом на зеркале, внутреннем сервере или в сетевой
+/// папке — там, где GitHub недоступен (корпоративная сеть).
+///
+/// ```json
+/// { "version": "2.5.0",
+///   "url": "\\\\server\\share\\RemontExplorer-windows-x64.zip",
+///   "sha256": "7803...8002",
+///   "notes": "что нового" }
+/// ```
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Manifest {
+    pub version: String,
+    /// Ссылка на архив: http(s), `file://`, UNC или обычный путь.
+    #[serde(default)]
+    pub url: String,
+    /// SHA-256 архива (hex). Пусто — проверка не выполняется.
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// Разобрать манифест и сравнить с текущей версией.
+pub fn parse_manifest(text: &str, current: &str) -> Result<Option<UpdateInfo>, String> {
+    let m: Manifest = serde_json::from_str(text)
+        .map_err(|e| format!("манифест обновления не читается: {e}"))?;
+    let version = m.version.trim().trim_start_matches(['v', 'V']).to_string();
+    if version.is_empty() {
+        return Err("в манифесте нет версии".into());
+    }
+    if !is_newer(&version, current) {
+        return Ok(None);
+    }
+    let asset = if m.url.trim().is_empty() {
+        None
+    } else {
+        Some(m.url.trim().to_string())
+    };
+    let sha = m.sha256.trim().to_lowercase();
+    Ok(Some(UpdateInfo {
+        url: asset.clone().unwrap_or_default(),
+        asset_url: asset,
+        sha256: if sha.is_empty() { None } else { Some(sha) },
+        version,
+    }))
+}
+
+/// Прочитать манифест из источника: http(s)-URL, `file://`, UNC или путь.
+///
+/// Если указана папка, из неё берётся `update.json`.
+pub fn check_manifest(source: &str, current: &str) -> Result<Option<UpdateInfo>, String> {
+    let text = read_source(source)?;
+    parse_manifest(&text, current)
+}
+
+fn read_source(source: &str) -> Result<String, String> {
+    let raw = source.trim();
+    if raw.is_empty() {
+        return Err("адрес обновлений не задан".into());
+    }
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        let resp = agent()
+            .get(raw)
+            .call()
+            .map_err(|e| format!("манифест недоступен: {raw}: {e}"))?;
+        return resp
+            .into_string()
+            .map_err(|e| format!("манифест не читается: {raw}: {e}"));
+    }
+    let path = raw.strip_prefix("file://").unwrap_or(raw);
+    let path = std::path::Path::new(path);
+    let target = if path.is_dir() {
+        path.join("update.json")
+    } else {
+        path.to_path_buf()
+    };
+    std::fs::read_to_string(&target)
+        .map_err(|e| format!("манифест не читается: {}: {e}", target.display()))
+}
+
+/// SHA-256 файла в hex — проверка скачанного архива.
+pub fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| format!("файл не читается: {e}"))?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+
+    /// Манифест читается, версии сравниваются, хеш переносится в результат.
+    #[test]
+    fn manifest_parses_and_compares_versions() {
+        let text = r#"{"version":"2.5.0","url":"\\\\server\\share\\app.zip","sha256":"ABC123","notes":"что нового"}"#;
+        let info = parse_manifest(text, "2.4.5").unwrap().expect("обновление не найдено");
+        assert_eq!(info.version, "2.5.0");
+        assert_eq!(info.asset_url.as_deref(), Some(r"\\server\share\app.zip"));
+        assert_eq!(info.sha256.as_deref(), Some("abc123"));
+
+        // Та же версия — обновления нет.
+        assert!(parse_manifest(text, "2.5.0").unwrap().is_none());
+        // Битый JSON — понятная ошибка.
+        assert!(parse_manifest("{", "2.4.5").is_err());
+    }
+
+    /// Источник-папка: манифест берётся из `update.json` внутри неё.
+    #[test]
+    fn manifest_read_from_folder() {
+        let dir = std::env::temp_dir().join(format!("upd_manifest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("update.json"),
+            r#"{"version":"9.9.9","url":"app.zip","sha256":""}"#,
+        )
+        .unwrap();
+
+        let info = check_manifest(dir.to_str().unwrap(), "2.4.5").unwrap().expect("нет обновления");
+        assert_eq!(info.version, "9.9.9");
+        assert!(info.sha256.is_none(), "пустой хеш не должен превращаться в требование");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SHA-256 файла считается в hex (совпадает с `sha256sum`).
+    #[test]
+    fn sha256_matches_known_value() {
+        let path = std::env::temp_dir().join(format!("sha_probe_{}.txt", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

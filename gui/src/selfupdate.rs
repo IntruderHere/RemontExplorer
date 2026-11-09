@@ -28,6 +28,16 @@ pub fn download(
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("не создать папку загрузки: {e}"))?;
     }
+    // Локальный источник (сетевая папка, диск, file://): копируем файл.
+    // Нужно там, где GitHub недоступен — обновление кладут во внутреннюю папку.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        let src = url.strip_prefix("file://").unwrap_or(url);
+        std::fs::copy(src, dest).map_err(|e| format!("не удалось скопировать {src}: {e}"))?;
+        let len = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        progress(len, len);
+        return Ok(());
+    }
+
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
         // Сама загрузка может быть долгой — ограничение на соединение, не на объём.
