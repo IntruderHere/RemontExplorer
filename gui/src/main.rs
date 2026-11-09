@@ -3522,6 +3522,17 @@ fn main() -> eframe::Result<()> {
     // не создаётся. Без `--cli` аргументы обрабатывает GUI (контекстное меню).
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Файл, уведённый в сторону при прошлом обновлении. На сетевой папке он
+    // мог быть занят в момент замены — теперь процесс свободен, убираем.
+    if let Ok(me) = std::env::current_exe() {
+        if let Some(name) = me.file_name() {
+            let old = me.with_file_name(format!("{}.old", name.to_string_lossy()));
+            if old.exists() {
+                let _ = std::fs::remove_file(&old);
+            }
+        }
+    }
+
     // Режим установки обновления: новый exe заменяет старый файл и запускает
     // его. Окно не создаётся — процесс живёт несколько секунд.
     if let Some(i) = args.iter().position(|a| a == "--self-install") {

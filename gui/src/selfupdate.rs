@@ -201,11 +201,63 @@ pub fn run_self_install(dst: &Path, old_pid: u32) -> i32 {
         return 0;
     }
 
-    let new_len = std::fs::metadata(&me).map(|m| m.len()).unwrap_or(0);
-    log_line(&log, &format!("INSTALL copy {} -> {} ({} байт)", me.display(), dst.display(), new_len));
+    match replace_file(&me, dst, &log) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(staging_dir().join("pending.flag"));
+            let _ = std::process::Command::new(dst).spawn();
+            0
+        }
+        Err(last_error) => {
+            log_line(&log, &format!("FAIL copy: {last_error}"));
+            // Без сообщения пользователь видел бы только «приложение перезапустилось».
+            message_box(
+                "RemontExplorer — обновление не установлено",
+                &format!(
+                    "Не удалось заменить файл приложения.\n\n{}\n\nЦель: {}\nЖурнал: {}\n\nЗакройте программу и запустите её снова. Если приложение лежит на сетевом диске (\\\\server\\...), скопируйте его на локальный диск — там обновление проходит без помех.",
+                    last_error,
+                    dst.display(),
+                    log.display()
+                ),
+            );
+            let _ = std::process::Command::new(dst).spawn();
+            1
+        }
+    }
+}
 
+/// Заменить файл `dst` содержимым `me`, до 20 попыток.
+///
+/// Сетевые папки (`\\server\share`) не дают перезаписать запущенный exe
+/// (`os error 32`), но позволяют его **переименовать**: загрузчик Windows
+/// открывает файл с правом на удаление. Поэтому старый файл уводится в
+/// `<имя>.old`, после чего имя свободно.
+fn replace_file(me: &Path, dst: &Path, log: &Path) -> Result<(), String> {
+    let new_len = std::fs::metadata(me).map(|m| m.len()).unwrap_or(0);
+    log_line(
+        log,
+        &format!("INSTALL copy {} -> {} ({new_len} байт)", me.display(), dst.display()),
+    );
+
+    let backup = dst.with_file_name(format!(
+        "{}.old",
+        dst.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "old".into())
+    ));
+    let mut renamed = false;
     let mut last_error = String::new();
+
     for attempt in 1..=20u32 {
+        if attempt == 1 || attempt % 5 == 0 {
+            let _ = std::fs::remove_file(&backup);
+            match std::fs::rename(dst, &backup) {
+                Ok(()) => {
+                    renamed = true;
+                    log_line(log, &format!("BACKUP renamed target to {}", backup.display()));
+                }
+                Err(e) => log_line(log, &format!("BACKUP skip: {e}")),
+            }
+        }
         // Снимаем «только чтение», если файл помечен: иначе копирование не пройдёт.
         // Только Windows: на Unix `set_readonly(false)` открыл бы файл всем.
         #[cfg(windows)]
@@ -216,41 +268,32 @@ pub fn run_self_install(dst: &Path, old_pid: u32) -> i32 {
                 let _ = std::fs::set_permissions(dst, perms);
             }
         }
-        match std::fs::copy(&me, dst) {
+        match std::fs::copy(me, dst) {
             Ok(written) => {
                 let ok = std::fs::metadata(dst)
                     .map(|m| m.len() == new_len && (new_len == 0 || written == new_len))
                     .unwrap_or(false);
                 if ok {
-                    log_line(&log, &format!("OK file replaced on attempt {attempt}"));
-                    let _ = std::fs::remove_file(staging_dir().join("pending.flag"));
-                    let _ = std::process::Command::new(dst).spawn();
-                    return 0;
+                    log_line(log, &format!("OK file replaced on attempt {attempt}"));
+                    let _ = std::fs::remove_file(&backup);
+                    return Ok(());
                 }
                 last_error = format!("размер после копирования не совпал ({written} != {new_len})");
-                log_line(&log, &format!("RETRY {attempt}: {last_error}"));
+                log_line(log, &format!("RETRY {attempt}: {last_error}"));
             }
             Err(e) => {
                 last_error = e.to_string();
-                log_line(&log, &format!("RETRY {attempt}: {e}"));
+                log_line(log, &format!("RETRY {attempt}: {e}"));
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    log_line(&log, &format!("FAIL copy: {last_error}"));
-    // Без сообщения пользователь видел бы только «приложение перезапустилось».
-    message_box(
-        "RemontExplorer — обновление не установлено",
-        &format!(
-            "Не удалось заменить файл приложения.\n\n{}\n\nЦель: {}\nЖурнал: {}\n\nЗакройте программу и запустите её снова, либо распакуйте архив обновления вручную.",
-            last_error,
-            dst.display(),
-            log.display()
-        ),
-    );
-    let _ = std::process::Command::new(dst).spawn();
-    1
+    // Не вышло — возвращаем исходный файл на место, чтобы приложение не пропало.
+    if renamed && !dst.exists() {
+        let _ = std::fs::rename(&backup, dst);
+    }
+    Err(last_error)
 }
 
 /// Показать системное окно с сообщением (установщик работает без egui).
@@ -483,6 +526,44 @@ mod tests {
         assert!(pending_failed());
         clear_pending();
         assert!(!pending_failed());
+    }
+
+    /// Замена файла: новое содержимое на месте, резервная копия не остаётся.
+    #[test]
+    fn replace_file_overwrites_target() {
+        let dir = std::env::temp_dir().join(format!("re_replace_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("app.exe");
+        let me = dir.join("new.exe");
+        let log = dir.join("update.log");
+        std::fs::write(&dst, b"old-version").unwrap();
+        std::fs::write(&me, b"new-version-longer").unwrap();
+
+        replace_file(&me, &dst, &log).expect("замена не удалась");
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-version-longer");
+        assert!(
+            !dir.join("app.exe.old").exists(),
+            "осталась резервная копия"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Если цели нет (первый запуск), замена всё равно проходит.
+    #[test]
+    fn replace_file_creates_missing_target() {
+        let dir = std::env::temp_dir().join(format!("re_replace2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("app.exe");
+        let me = dir.join("new.exe");
+        let log = dir.join("update.log");
+        std::fs::write(&me, b"fresh").unwrap();
+
+        replace_file(&me, &dst, &log).expect("замена не удалась");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"fresh");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }
