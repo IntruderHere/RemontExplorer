@@ -963,19 +963,18 @@ impl App {
                             });
                             ui.add_space(12.0);
                             ui.add(egui::Label::new(self.t("about.desc")).wrap());
-                            // История проекта: короткий блок с прокруткой, чтобы
-                            // окно не растягивалось на весь экран.
-                            egui::ScrollArea::vertical()
-                                .id_salt("about_history")
-                                .max_height(40.0)
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(self.t("about.history")).small(),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
+                            // История проекта обычным шрифтом; ссылка на чужой
+                            // репозиторий — кликабельная, как и контакты ниже.
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(self.t("about.history_pre"));
+                                ui.hyperlink_to(
+                                    self.t("about.history_link"),
+                                    "https://github.com/SanderSade/DirLister",
+                                );
+                                ui.label(self.t("about.history_mid"));
+                            });
+                            ui.add(egui::Label::new(self.t("about.history_2")).wrap());
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(RichText::new(self.t("about.contacts")).small().weak());
                                 ui.hyperlink_to(
@@ -4124,8 +4123,11 @@ mod tests {
                 rect.width(),
                 rect.height()
             );
+            // «О приложении» содержит историю проекта обычным шрифтом —
+            // ему нужен запас, остальные диалоги остаются короткими.
+            let height_limit = if name == "about" { 340.0 } else { 300.0 };
             assert!(
-                rect.height() < 300.0,
+                rect.height() < height_limit,
                 "диалог {name} растянут по вертикали: {:.0} px (экран 800)",
                 rect.height()
             );
@@ -5623,7 +5625,18 @@ mod tests {
 
         let src = include_str!("main.rs");
         let code = &src[..src.find("#[cfg(test)]").expect("нет тестов")];
-        assert!(code.contains(r#"t("about.history")"#), "история не выводится в окне");
+        // История выводится частями: текст + кликабельная ссылка на чужой репозиторий.
+        assert!(code.contains(r#"t("about.history_pre")"#), "история не выводится в окне");
+        assert!(code.contains(r#"t("about.history_2")"#), "нет второй части истории");
+        assert!(
+            code.contains("https://github.com/SanderSade/DirLister"),
+            "ссылка на DirLister не кликабельная"
+        );
+        // Шрифт истории — обычный, как у остального текста окна.
+        let at = code.find(r#"t("about.history_2")"#).unwrap();
+        let hist = &code[at..at + 160];
+        assert!(!hist.contains(".small()"), "история набрана мелким шрифтом");
+        assert!(hist.contains(".wrap()"), "история не переносится по словам");
         assert!(code.contains("https://t.me/ivanevseev1"), "нет ссылки на Telegram");
         assert!(
             code.contains("https://github.com/IntruderHere"),
